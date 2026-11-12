@@ -1,0 +1,19 @@
+{
+  "name": "docs",
+  "type": "module",
+  "version": "0.0.1",
+  "packageManager": "pnpm@12.11.2",
+  "scripts": {
+    "dev": "astro dev",
+    "start": "astro dev",
+    "build": "astro build",
+    "check-go-import": "node scripts/check-go-import.mjs dist",
+    "preview": "astro preview",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "0.42.6",
+    "astro": "7.4.2",
+    "sharp": "0.35.5"
+  }
+}

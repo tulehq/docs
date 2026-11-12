@@ -1,0 +1,23 @@
+---
+title: Tule
+description: Tule runs local drop-in replacements for AWS services.
+template: splash
+tableOfContents: false
+editUrl: false
+prev: false
+next: false
+---
+
+import { modulePath, modules } from '../../modules.mjs';
+
+Tule runs local drop-in replacements for AWS services.
+
+## Modules
+
+<ul>
+	{modules.map((m) => (
+		<li>
+			<a href={`/${m.name}/`}><code>{modulePath(m)}</code></a>: {m.description}
+		</li>
+	))}
+</ul>

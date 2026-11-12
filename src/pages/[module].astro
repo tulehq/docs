@@ -1,0 +1,16 @@
+---
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
+import { modulePath, modules } from '../modules.mjs';
+
+export function getStaticPaths() {
+	return modules.map((m) => ({ params: { module: m.name }, props: { m } }));
+}
+
+const { m } = Astro.props;
+---
+
+<StarlightPage frontmatter={{ title: modulePath(m), description: m.description }}>
+	<p>{m.description}</p>
+	<pre><code>go get {modulePath(m)}</code></pre>
+	<p>Source: <a href={m.repo}>{m.repo.replace('https://', '')}</a></p>
+</StarlightPage>
