@@ -31,6 +31,11 @@ export const modules = [
 		description: 'Organizations-compatible accounts.',
 	},
 	{
+		name: 'identity',
+		repo: 'https://github.com/tulehq/identity',
+		description: 'IAM and STS-compatible users, access keys and role sessions.',
+	},
+	{
 		name: 'sigv4',
 		repo: 'https://github.com/tulehq/sigv4',
 		description: 'Shared AWS Signature Version 4 verification.',
