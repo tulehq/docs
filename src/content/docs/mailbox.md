@@ -1,6 +1,6 @@
 ---
 title: mailbox
-description: "mailbox 0.1.0: a local stand-in for SES v2."
+description: "mailbox 0.2.0: a local stand-in for SES v2."
 ---
 
 An Amazon SES v2-compatible mail service that never delivers mail. Every
@@ -10,10 +10,11 @@ what was sent. It is built to stand in for SES in local development and
 end-to-end tests: point an AWS SDK, or anything that sends through SES v2, at
 it, and then ask it what your code sent.
 
-It is not a mail server. No message leaves it, no identity is ever verified
-(every identity counts as verified at once), and every access key it accepts
-can send and read every message: the configured key, and, when it is pointed
-at [identity](/identity/), every key identity issued.
+It is not a mail server. No message leaves it, and no identity is ever
+verified (every identity counts as verified at once). The configured access
+key can send and read every message; when it is pointed at
+[identity](/identity/), the keys identity issued are accepted too, and each
+is held to its IAM identity policies ([Permissions](#permissions)).
 
 ## Running it
 
@@ -22,7 +23,7 @@ With Docker:
 ```sh
 docker run --rm -p 9040:9040 -v mailboxdata:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
-  ghcr.io/tulehq/mailbox:0.1.0
+  ghcr.io/tulehq/mailbox:0.2.0
 ```
 
 The image is based on Alpine, so `docker exec -it <container> sh` gives you a
@@ -60,7 +61,9 @@ Settings come from environment variables prefixed with `TULE_`, and from a
 | `TULE_Server_ShutdownTimeout` | `7s` | How long a graceful shutdown waits for in-flight requests |
 | `TULE_Auth_AccessKeyID` | required | The access key clients sign requests with |
 | `TULE_Auth_SecretAccessKey` | required | Its secret |
-| `TULE_Auth_IdentityEndpoint` | unset | The identity service's base URL, such as `http://localhost:9030`: an absolute http or https URL. Set, the keys identity issued are accepted as well as the configured key, and identity is asked about them with the configured key, which must be identity's root key. Unset, mailbox runs standalone on the configured key alone |
+| `TULE_Auth_IdentityEndpoint` | unset | The identity service's base URL, such as `http://localhost:9030`: an absolute http or https URL. Set, the keys identity issued are accepted as well as the configured key, held to their identity policies ([Permissions](#permissions)), and identity is asked about them with the configured key, which must be identity's root key. Identity 0.2.0 or later is required. Unset, mailbox runs standalone on the configured key alone |
+| `TULE_Mailbox_AccountID` | `000000000000` | The account mailbox's resources belong to: 12 digits. The root key acts in it, the ARNs carry it, and a principal of any other account is refused. The default is identity's default management account |
+| `TULE_Mailbox_Region` | `us-east-1` | The region the ARNs carry and `aws:RequestedRegion` is, whatever region a request was signed for |
 | `TULE_GasEnv` | | `development` logs console output at trace level, `production` logs at warn level, `testing` disables logging |
 
 The read and write timeouts are sized for the largest request this service
@@ -78,6 +81,90 @@ signed with the configured key never asks identity. When identity cannot be
 asked, fails, or gives no answer within 10 seconds, a request signed with
 another key fails with `500` `InternalFailure`, never as an unknown key,
 and the configured key keeps working.
+
+## Permissions
+
+Without an identity endpoint nothing is evaluated: the configured key is the
+account's root, and may call everything.
+
+With one, mailbox authorizes requests as AWS does within an account, with
+[tule.dev/policy](/policy/):
+
+- **The root principal**, the configured key, which is also identity's root
+  user's key, is always allowed and never evaluated.
+- **Every other principal**, an IAM user's key or a role session's, is
+  evaluated on every request, to the SES API and the retrieval API alike,
+  against the identity policies identity reports for it: a user's inline and
+  attached managed policies, or a session's role's. An explicit `Deny` wins;
+  otherwise the request needs an `Allow`. A request that is not allowed
+  fails with `403` `AccessDeniedException` and AWS's message, "User: \<arn\>
+  is not authorized to perform: \<action\> on resource: \<arn\> because no
+  identity-based policy allows the \<action\> action". Nothing is stored for
+  a denied request.
+- **A principal of another account** than `TULE_Mailbox_AccountID` is
+  refused every operation, `tule:Inspect` included, whatever its policies
+  allow: on AWS a cross-account request also needs a resource-based policy,
+  none is enforced here, and one store serves every account.
+
+**This is a breaking change from 0.1.** A key identity issued used to be able
+to call everything; one with no policy is now denied everything, and one of
+a member account is denied everything whatever its policies. Give it a
+policy, such as `{"Effect": "Allow", "Action": ["ses:*", "tule:Inspect"],
+"Resource": "*"}` for the access it had.
+
+### Actions and resources
+
+Each operation is evaluated as its action and on its resources from the
+Service Authorization Reference for SES, with ARNs such as
+`arn:aws:ses:<region>:<account>:identity/<name>`, `configuration-set/<name>`
+and `template/<name>`, in mailbox's account and region, never the
+request's.
+
+| Operation | Action | Evaluated on |
+|---|---|---|
+| `SendEmail` | `ses:SendEmail` | The sender's identity, and for `Raw` content with a `From` header and `FromEmailAddress` the header's identity too; the configuration set, when the request (or a raw message's `X-SES-CONFIGURATION-SET` header) names one; the stored template, for `Template` content that names one |
+| `SendBulkEmail` | `ses:SendBulkEmail` | The same three, from the request; a denial refuses the whole request |
+| `CreateEmailIdentity` | `ses:CreateEmailIdentity`, and `ses:TagResource` when it has `Tags` | The new identity |
+| `GetEmailIdentity`, `DeleteEmailIdentity` | `ses:GetEmailIdentity`, `ses:DeleteEmailIdentity` | The identity |
+| `ListEmailIdentities` | `ses:ListEmailIdentities` | `*` |
+| `CreateEmailTemplate` | `ses:CreateEmailTemplate`, and `ses:TagResource` when it has `Tags` | The new template |
+| `GetEmailTemplate`, `UpdateEmailTemplate`, `DeleteEmailTemplate`, `TestRenderEmailTemplate` | `ses:<Operation>` | The template |
+| `ListEmailTemplates`, `GetAccount` | `ses:<Operation>` | `*` |
+| The retrieval API, every route | `tule:Inspect` | `arn:aws:ses:<region>:<account>:*` |
+
+`SendEmail` with `Raw` content needs `ses:SendEmail` alone, as the reference
+maps the v2 operation; `ses:SendRawEmail` is SES v1's.
+
+**The sender's identity.** mailbox sends from any address, so a send is
+evaluated on the most granular identity created that covers the address:
+the email address identity, else its domain, else its nearest parent domain
+created, else, with none created, the address's domain. Which identity AWS
+evaluates when several cover an address is not documented; this is
+mailbox's choice. The candidates skipped are still checked for an explicit
+`Deny`, so a `Deny` on `identity/example.com` cannot be sidestepped through a
+subdomain no identity covers. Domain identities are compared in lower case,
+email address identities as written.
+
+**`tule:Inspect`** is not an AWS action, since AWS has no API that reads back
+what SES accepted. It is evaluated on the whole service in the account and
+region, so it takes a grant such as `"Resource": "*"` or
+`"arn:aws:ses:*:<account>:*"`.
+
+Every request supplies the global `aws:SourceIp`, `aws:CurrentTime`,
+`aws:EpochTime`, `aws:SecureTransport`, `aws:RequestedRegion`
+(`TULE_Mailbox_Region`), `aws:PrincipalAccount`, `aws:PrincipalArn`,
+`aws:PrincipalType` and, for an IAM user, `aws:username`. SES operations also
+supply `ses:ApiVersion` (`2`); `SendEmail` supplies `ses:FromAddress`,
+`ses:FromDisplayName`, `ses:Recipients` and `ses:FeedbackAddress`; creates
+supply `aws:RequestTag/<key>` and `aws:TagKeys`; and an existing identity or
+template supplies `aws:ResourceTag/<key>`.
+
+The gaps, as the README lists them: a role session's `aws:PrincipalArn` has
+no path, so a condition on a role ARN with a path does not match it; there
+is no `aws:PrincipalTag/<key>` and no `aws:userid`; SES's sending
+authorization policies are not served, so no resource-based policy is
+evaluated; and permissions boundaries, session policies and SCPs are not
+evaluated.
 
 ## Health checks
 
@@ -171,7 +258,9 @@ Requests are checked as SES checks them, with SES's errors:
 - **Raw messages** must have a header and a body separated by a blank line,
   well-formed MIME parts, at most 500 of them, no line over 1,000 characters,
   and none of the header fields SES allows once (Subject, From, Date and the
-  rest of SES's list) more than once: `MessageRejected`.
+  rest of SES's list) more than once, and no control character in the
+  header but HTAB and the line endings, a CR ending its line with an LF:
+  `MessageRejected`.
 - **Message tags**: names and values of ASCII letters, digits, `_` and `-`,
   up to 256 characters. **Resource tags** on identities and templates: at most
   50, keys of 1 to 128 and values of up to 256 characters by SES's tag rules,
@@ -285,8 +374,9 @@ entries are sent.
 ## Retrieval API
 
 Not an AWS API. Every route is under `/_mailbox/`, signed with SigV4 for the
-`ses` service exactly like the SES API (the configured key, or any key
-identity accepts), and answers JSON. Errors have the SES API's shape, with
+`ses` service exactly like the SES API (the configured key, or a key identity
+issued whose policies allow `tule:Inspect`; see
+[Permissions](#permissions)), and answers JSON. Errors have the SES API's shape, with
 `BadRequestException` (`400`) for invalid parameters and `NotFoundException`
 (`404`) for an unknown message or attachment.
 
@@ -502,9 +592,8 @@ curl.
   with its token; a token that is not the session's fails with
   `UnrecognizedClientException`, and an expired one with
   `ExpiredTokenException`.
-- **Every accepted key may do everything.** There are no permissions, so no
-  request is refused with `AccessDeniedException`, and any key the service
-  accepts can read and delete every stored message.
+- **Only identity-based policies are enforced**, and only with identity; see
+  [Permissions](#permissions) for the keys supplied and the gaps.
 - **One process per database.** The store is one SQLite file reached through
   one connection, which serializes the server's own transactions; nothing
   coordinates two servers pointed at the same file.
@@ -512,9 +601,26 @@ curl.
   trusted, since nothing is expected in front of this service and the header
   is unsigned.
 
+## Upgrading from 0.1
+
+- **Permissions.** With an identity endpoint, keys identity issued are now
+  held to their identity policies, and those of other accounts are refused;
+  see [Permissions](#permissions).
+- **Domain identity names are lower-cased.** On its first start, 0.2 runs a
+  migration that lower-cases the names of the domain identities in the
+  store. When two differ only by case, such as `Example.com` and
+  `example.com`, the migration fails, names them and changes nothing, and
+  mailbox does not start. Delete all but one of them from the database file,
+  then the migration's dirty mark, and start it again:
+
+  ```sh
+  sqlite3 data/mailbox.db "DELETE FROM identities WHERE name = 'Example.com';
+    DELETE FROM __gas_migrations WHERE version = '0003' AND dirty;"
+  ```
+
 ## Release and module
 
 This page follows the mailbox README at
-[v0.1.0](https://github.com/tulehq/mailbox/blob/v0.1.0/README.md), released as
-`ghcr.io/tulehq/mailbox:0.1.0`. Its Go module is `tule.dev/mailbox`, with the
+[v0.2.0](https://github.com/tulehq/mailbox/blob/v0.2.0/README.md), released as
+`ghcr.io/tulehq/mailbox:0.2.0`. Its Go module is `tule.dev/mailbox`, with the
 source at [github.com/tulehq/mailbox](https://github.com/tulehq/mailbox).

@@ -1,6 +1,6 @@
 ---
 title: accounts
-description: "accounts 0.2.0: a local stand-in for Organizations."
+description: "accounts 0.3.0: a local stand-in for Organizations."
 ---
 
 An AWS Organizations-compatible account service that keeps an organization in
@@ -9,10 +9,10 @@ development and end-to-end tests: point an AWS SDK at it and the usual
 organization, account, OU and tag calls work.
 
 It is not a production account service. No AWS account exists behind any ID
-it hands out, there are no policies, and every access key it accepts acts on
-the one organization: the configured key, the management account's root
-user's, and, when it is pointed at [identity](/identity/),
-every key identity issued.
+it hands out, and every access key it accepts acts on the one organization:
+the configured key, the management account's root user's, and, when it is
+pointed at [identity](/identity/), every key identity issued, held to the
+IAM policies identity holds for it.
 
 ## Running it
 
@@ -21,7 +21,7 @@ With Docker:
 ```sh
 docker run --rm -p 9020:9020 -v accountsdata:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
-  ghcr.io/tulehq/accounts:0.2.0
+  ghcr.io/tulehq/accounts:0.3.0
 ```
 
 The image is based on Alpine, so `docker exec -it <container> sh` gives you a
@@ -60,7 +60,7 @@ Settings come from environment variables prefixed with `TULE_`, and from a
 | `TULE_Server_ShutdownTimeout` | `7s` | How long a graceful shutdown waits for in-flight requests |
 | `TULE_Auth_AccessKeyID` | required | The access key clients sign requests with |
 | `TULE_Auth_SecretAccessKey` | required | Its secret |
-| `TULE_Auth_IdentityEndpoint` | unset | The identity service's base URL, such as `http://localhost:9030`: an absolute http or https URL. Set, the keys identity issued are accepted as well as the configured key, and identity is asked about them with the configured key, which must be identity's root key. Unset, accounts runs standalone on the configured key alone |
+| `TULE_Auth_IdentityEndpoint` | unset | The identity service's base URL, such as `http://localhost:9030`: an absolute http or https URL. Set, the keys identity issued are accepted as well as the configured key, held to their IAM policies ([below](#permissions)), and identity is asked about them with the configured key, which must be identity's root key. Unset, accounts runs standalone on the configured key alone |
 | `TULE_GasEnv` | | `development` logs console output at trace level, `production` logs at warn level, `testing` disables logging |
 
 The read and write timeouts are sized for a signed request body of up to 1 MiB,
@@ -78,6 +78,73 @@ signed with the configured key never asks identity. When identity cannot be
 asked, fails, or gives no answer within 10 seconds, a request signed with
 another key fails with `500` `ServiceException`, never as an unknown key,
 and the configured key keeps working.
+
+## Permissions
+
+Standalone, nothing is evaluated: the configured key is the management
+account's root user and may call every operation.
+
+With an identity endpoint, every request signed with a key identity issued,
+an IAM user's or a role session's, is authorized with
+[tule.dev/policy](/policy/) against the identity policies identity returns
+for the key (inline and attached managed, a session's being its role's):
+
+1. The root principal, the configured key, which is identity's root key, is
+   never evaluated.
+2. A principal of any account but the management account, such as an
+   `OrganizationAccountAccessRole` session in a member account, is refused
+   with `AccessDeniedException`, "You don't have permissions to access this
+   resource.", whatever its policies, for every operation but
+   `DescribeOrganization`, which only the management account may call on
+   AWS. `DescribeOrganization` is allowed to an `ACTIVE` member account's
+   principal when its own policies allow it.
+3. Otherwise the action must be allowed, and not denied, on every resource
+   the request acts on, or the request is `400` `AccessDeniedException`,
+   "User: \<principal ARN\> is not authorized to perform: \<action\> on
+   resource: \<resource ARN\> because no identity-based policy allows the
+   \<action\> action", or "... with an explicit deny in an identity-based
+   policy".
+
+**Breaking change:** a key identity issued with no policy allowing an
+action is now refused it. Keys that worked with no policies need one, such
+as `{"Effect":"Allow","Action":"organizations:*","Resource":"*"}`. A role
+session in a member account can no longer call anything but
+`DescribeOrganization`.
+
+Each operation is evaluated as the action and resource types the Service
+Authorization Reference lists for it, with the management account in each
+ARN:
+
+| Operations | Action | Resource |
+| --- | --- | --- |
+| `CreateOrganization`, `DescribeOrganization`, `DeleteOrganization`, `CreateAccount`, `DescribeCreateAccountStatus`, `ListCreateAccountStatus`, `ListAccounts`, `ListRoots` | `organizations:<Operation>` | `*` |
+| `DescribeAccount`, `CloseAccount`, `RemoveAccountFromOrganization` | `organizations:<Operation>` | `arn:aws:organizations::<management>:account/o-<org>/<AccountId>` |
+| `ListAccountsForParent`, `ListChildren`, `ListOrganizationalUnitsForParent`, `CreateOrganizationalUnit` | `organizations:<Operation>` | the parent: `...:root/o-<org>/r-<id>` or `...:ou/o-<org>/ou-<id>` |
+| `MoveAccount` | `organizations:MoveAccount` | the account, `SourceParentId` and `DestinationParentId` |
+| `ListParents` | `organizations:ListParents` | the child account or OU |
+| `DescribeOrganizationalUnit`, `UpdateOrganizationalUnit`, `DeleteOrganizationalUnit` | `organizations:<Operation>` | the OU |
+| `TagResource`, `UntagResource`, `ListTagsForResource` | `organizations:<Operation>` | the account, root or OU `ResourceId` names |
+
+`CreateAccount` and `CreateOrganizationalUnit` with tags also need
+`organizations:TagResource`, evaluated on `*` since the new resource does not
+exist yet, which may differ from AWS.
+
+The condition keys supplied are the global `aws:SourceIp`,
+`aws:CurrentTime`, `aws:EpochTime`, `aws:SecureTransport`,
+`aws:PrincipalAccount`, `aws:PrincipalArn`, `aws:PrincipalType`,
+`aws:RequestedRegion` (always `us-east-1`) and, for an IAM user,
+`aws:username`; `aws:ResourceTag/<key>` from each evaluated resource's tags;
+and `aws:RequestTag/<key>` and `aws:TagKeys` from the tags of
+`CreateAccount`, `CreateOrganizationalUnit`, `TagResource` and
+`UntagResource`.
+
+The known gaps, as the README lists them: a role session's
+`aws:PrincipalArn` lacks the role's path, so a condition on a role ARN with
+a path does not match it; `aws:PrincipalTag/<key>` and `aws:userid` are not
+supplied; tags in one request whose keys differ only by case are refused
+for an evaluated principal; and service control policies, permissions
+boundaries, session policies and resource-based policies are not
+evaluated.
 
 The management account is configured, not created. `CreateOrganization` makes
 it the management account and the first member of the new organization, in
@@ -180,13 +247,10 @@ paginators work.
   moves the account straight to `State` `CLOSED`, never through
   `PENDING_CLOSURE`. A closed account stays in the
   organization for good: nothing removes it after AWS's 90 days.
-- **Every accepted key may call every operation.** There are no permissions,
-  so no request is ever refused with `AccessDeniedException`, and nothing here
-  tells you whether a deployment's permissions are right. Standalone, the one
-  configured key is the management account's root user. With identity, any
-  key identity issued, an IAM user's or a role session's in a member account
-  included, acts on the one organization with every Organizations operation,
-  where AWS lets only the management account's principals call them. There
+- **Permissions need identity.** Standalone, the one configured key is the
+  management account's root user and may call every operation. With
+  identity, keys it issued are held to their identity policies as
+  [Permissions](#permissions) describes, with the gaps listed there. There
   are no delegated administrators.
 - **One organization.** The service holds at most one, around the configured
   management account, which is not checked the way AWS checks an account
@@ -205,10 +269,10 @@ paginators work.
 - **Emails are unique within the organization only,** compared without
   regard to case, where AWS requires an email no AWS account uses.
   `EMAIL_ALREADY_EXISTS` is the only `FailureReason` `CreateAccount` reports.
-- **No policies.** The root of an organization with all features reports
-  service control policies as enabled, as AWS's does, and
+- **No Organizations policies.** The root of an organization with all
+  features reports service control policies as enabled, as AWS's does, and
   `DescribeOrganization` reports the deprecated `AvailablePolicyTypes`, but no
-  policy exists or is enforced.
+  service control or other Organizations policy exists or is enforced.
 - **Operations outside the scope are unknown.** The policy and policy-type
   operations, handshakes and invitations, `LeaveOrganization`, delegated
   administrators, service access, resource policies, responsibility transfers,
@@ -271,6 +335,6 @@ paginators work.
 ## Release and module
 
 This page follows the accounts README at
-[v0.2.0](https://github.com/tulehq/accounts/blob/v0.2.0/README.md), released as
-`ghcr.io/tulehq/accounts:0.2.0`. Its Go module is `tule.dev/accounts`, with the
+[v0.3.0](https://github.com/tulehq/accounts/blob/v0.3.0/README.md), released as
+`ghcr.io/tulehq/accounts:0.3.0`. Its Go module is `tule.dev/accounts`, with the
 source at [github.com/tulehq/accounts](https://github.com/tulehq/accounts).
