@@ -25,8 +25,13 @@ types.
   whether AssumeRole also needs an identity policy.
 - Malformed request values never grant and always deny.
 
-None of the released services evaluates policies yet; see
-[Identity and keys](/guides/identity/#policies).
+[identity](/identity/) parses the policies it stores with it and evaluates
+identity and trust policies with it, and [object-store](/object-store/),
+[secret-store](/secret-store/), [accounts](/accounts/), [mailbox](/mailbox/)
+and [queues](/queues/) evaluate the identity policies of the keys identity
+issued with it; see [Identity and keys](/guides/identity/#policies).
 
 The full semantics, their sources in the IAM User Guide, and the known gaps
-are in the [README](https://github.com/tulehq/policy#readme).
+are in the
+[README at v0.1.0](https://github.com/tulehq/policy/blob/v0.1.0/README.md).
+Source: [github.com/tulehq/policy](https://github.com/tulehq/policy).
