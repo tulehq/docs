@@ -46,6 +46,16 @@ export const modules = [
 		description: 'SQS-compatible standard and FIFO queues.',
 	},
 	{
+		name: 'functions',
+		repo: 'https://github.com/tulehq/functions',
+		description: 'Lambda-compatible container-image functions, triggered by queues.',
+	},
+	{
+		name: 'console',
+		repo: 'https://github.com/tulehq/console',
+		description: 'A web console for every Tule service.',
+	},
+	{
 		name: 'sigv4',
 		repo: 'https://github.com/tulehq/sigv4',
 		description: 'Shared AWS Signature Version 4 verification.',
