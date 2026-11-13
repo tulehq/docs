@@ -3,17 +3,19 @@ title: The full stack
 description: Run every Tule service and the console together with Docker Compose.
 ---
 
-The console's [`compose.yaml`](https://github.com/tulehq/console/blob/v0.1.0/compose.yaml)
-runs every service and the console, wired together: one root key everywhere,
-every service pointed at identity so the keys identity issues work on all of
-them, and the console pointed at each.
+The compose file [below](#the-file) runs every service and the console,
+wired together: one root key everywhere, every service pointed at identity
+so the keys identity issues work on all of them, each held to its IAM
+policies, and the console pointed at each. It is the console's
+[`compose.yaml`](https://github.com/tulehq/console/blob/v0.1.0/compose.yaml)
+with the images of the current releases; the console's v0.1.0 file pins
+earlier ones, from before the services enforced policies.
 
 ## Start it
 
-Fetch the file from the console's v0.1.0 tag and start the stack:
+Save [the file](#the-file) as `compose.yaml` and start the stack:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/tulehq/console/v0.1.0/compose.yaml
 docker compose up -d
 ```
 
@@ -33,18 +35,20 @@ The functions README marks its Docker Desktop (macOS, Windows) setup as
 unverified; see [functions](/functions/#running-it).
 
 Then open `http://localhost:9070` and [sign in](/getting-started/console/) with
-the root key.
+the root key. The root key may do everything; a key identity issues may do
+only what its policies allow, and nothing until it has one (see
+[Identity and keys](/guides/identity/#policies)).
 
 ## What runs
 
 | Service | Image | Port on the host |
 |---|---|---|
-| identity | `ghcr.io/tulehq/identity:0.1.0` | 9030 |
-| accounts | `ghcr.io/tulehq/accounts:0.2.0` | 9020 |
-| object-store | `ghcr.io/tulehq/object-store:0.5.0` | 9000 |
-| secret-store | `ghcr.io/tulehq/secret-store:0.2.0` | 9010 |
-| mailbox | `ghcr.io/tulehq/mailbox:0.1.0` | 9040 |
-| queues | `ghcr.io/tulehq/queues:0.1.0` | 9050 |
+| identity | `ghcr.io/tulehq/identity:0.4.0` | 9030 |
+| accounts | `ghcr.io/tulehq/accounts:0.3.0` | 9020 |
+| object-store | `ghcr.io/tulehq/object-store:0.6.0` | 9000 |
+| secret-store | `ghcr.io/tulehq/secret-store:0.3.0` | 9010 |
+| mailbox | `ghcr.io/tulehq/mailbox:0.2.0` | 9040 |
+| queues | `ghcr.io/tulehq/queues:0.2.0` | 9050 |
 | functions (profile `functions`) | `ghcr.io/tulehq/functions:0.1.1` | 9060, and 9061 for the Runtime API |
 | console | `ghcr.io/tulehq/console:0.1.0` | 9070 |
 
@@ -75,7 +79,7 @@ x-identity: &identity-endpoint
 
 services:
   identity:
-    image: ghcr.io/tulehq/identity:0.1.0
+    image: ghcr.io/tulehq/identity:0.4.0
     environment:
       <<: *root-key
       TULE_Identity_AccountsEndpoint: http://accounts:9020
@@ -83,35 +87,35 @@ services:
     volumes: [identitydata:/data]
 
   accounts:
-    image: ghcr.io/tulehq/accounts:0.2.0
+    image: ghcr.io/tulehq/accounts:0.3.0
     environment:
       <<: [*root-key, *identity-endpoint]
     ports: ["9020:9020"]
     volumes: [accountsdata:/data]
 
   object-store:
-    image: ghcr.io/tulehq/object-store:0.5.0
+    image: ghcr.io/tulehq/object-store:0.6.0
     environment:
       <<: [*root-key, *identity-endpoint]
     ports: ["9000:9000"]
     volumes: [objectdata:/data]
 
   secret-store:
-    image: ghcr.io/tulehq/secret-store:0.2.0
+    image: ghcr.io/tulehq/secret-store:0.3.0
     environment:
       <<: [*root-key, *identity-endpoint]
     ports: ["9010:9010"]
     volumes: [secretdata:/data]
 
   mailbox:
-    image: ghcr.io/tulehq/mailbox:0.1.0
+    image: ghcr.io/tulehq/mailbox:0.2.0
     environment:
       <<: [*root-key, *identity-endpoint]
     ports: ["9040:9040"]
     volumes: [maildata:/data]
 
   queues:
-    image: ghcr.io/tulehq/queues:0.1.0
+    image: ghcr.io/tulehq/queues:0.2.0
     environment:
       <<: [*root-key, *identity-endpoint]
       # Queue URLs name the host clients on this machine reach queues at.
@@ -178,4 +182,4 @@ curl -fsS http://localhost:9000/_ready
 ## Next
 
 - [Point your code at the stack](/guides/aws-clients/).
-- [Create users, keys and role sessions](/guides/identity/).
+- [Create users, keys, policies and role sessions](/guides/identity/).

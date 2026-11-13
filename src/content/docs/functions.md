@@ -75,7 +75,7 @@ Event source mappings poll a queue over the SQS API. With
 ```yaml
 services:
   queues:
-    image: ghcr.io/tulehq/queues:0.1.0
+    image: ghcr.io/tulehq/queues:0.2.0
     environment:
       TULE_Auth_AccessKeyID: test
       TULE_Auth_SecretAccessKey: test
