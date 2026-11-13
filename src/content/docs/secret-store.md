@@ -1,6 +1,6 @@
 ---
 title: secret-store
-description: "secret-store 0.2.0: a local stand-in for Secrets Manager."
+description: "secret-store 0.3.0: a local stand-in for Secrets Manager."
 ---
 
 An AWS Secrets Manager-compatible secret store that keeps secrets on the local
@@ -9,8 +9,8 @@ and end-to-end tests: point an AWS SDK at it and the usual secret, version and
 staging-label calls work.
 
 It is not a production secret store. Values are kept as plain JSON files on one
-machine, nothing is encrypted, and every access key it accepts has access to
-every secret.
+machine and nothing is encrypted. The root key has access to every secret;
+the keys [identity](/identity/) issues have what their IAM policies allow.
 
 ## Running it
 
@@ -20,7 +20,7 @@ With Docker:
 docker run --rm -p 9010:9010 -v secretdata:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
   -e TULE_Store_Seed='{"myapp/config":{"Database":{"Host":"db.internal"}}}' \
-  ghcr.io/tulehq/secret-store:0.2.0
+  ghcr.io/tulehq/secret-store:0.3.0
 ```
 
 The image is based on Alpine, so `docker exec -it <container> sh` gives you a
@@ -47,7 +47,7 @@ Settings come from environment variables prefixed with `TULE_`, and from a
 | `TULE_Server_Port` | `9010` | Listen port |
 | `TULE_Store_RootDir` | `./data` (`/data` in the image) | Where secrets are stored |
 | `TULE_Store_Region` | `us-east-1` | Region in the ARNs the store mints |
-| `TULE_Store_AccountID` | `000000000000` | Account in the ARNs the store mints |
+| `TULE_Store_AccountID` | `000000000000` | Account in the ARNs the store mints, and the account whose principals are accepted |
 | `TULE_Store_Seed` | unset | JSON object of secret name to value, created at startup if missing |
 | `TULE_HSTS_MaxAge` | unset | `Strict-Transport-Security` max age; the header is only sent when set |
 | `TULE_Server_ReadTimeout` | `30s` | How long the server may take to read a request, body included |
@@ -57,7 +57,7 @@ Settings come from environment variables prefixed with `TULE_`, and from a
 | `TULE_Server_ShutdownTimeout` | `7s` | How long a graceful shutdown waits for in-flight requests |
 | `TULE_Auth_AccessKeyID` | required | The root key clients sign requests with; it must be identity's root key when `TULE_Auth_IdentityEndpoint` is set |
 | `TULE_Auth_SecretAccessKey` | required | Its secret |
-| `TULE_Auth_IdentityEndpoint` | unset | The [identity](/identity/) service's base URL, such as `http://localhost:9030`, to also accept the keys it issues. Unset, only the root key is accepted |
+| `TULE_Auth_IdentityEndpoint` | unset | The [identity](/identity/) service's base URL, such as `http://localhost:9030`, to also accept the keys it issues, each request evaluated against the principal's IAM policies. Unset, only the root key is accepted |
 | `TULE_GasEnv` | | `development` logs console output at trace level, `production` logs at warn level, `testing` disables logging |
 
 The read and write timeouts are sized for a signed request body of up to 1 MiB,
@@ -89,6 +89,81 @@ treated as an unknown key or as a valid one, and the root key keeps working.
 
 Unset, the service runs on its own exactly as without identity: only the
 root key is accepted, and identity is never contacted.
+
+identity v0.2.0 or later is required: the service asks the signing-key
+endpoint for each principal's policies, and with an older identity every
+request signed with one of its keys fails with `InternalServiceError`.
+
+### IAM policies
+
+Every request signed with a key identity issued, an IAM user's or a role
+session's, is evaluated against that principal's identity-based policies
+(inline and attached managed, a session carrying its role's) with
+[tule.dev/policy](/policy/): an explicit `Deny` wins, then any `Allow`, and
+otherwise the request is denied. The root key, the root of
+`TULE_Store_AccountID`, is never evaluated, so without
+`TULE_Auth_IdentityEndpoint` nothing is.
+
+**This is a breaking change.** Before, every key identity issued could read
+and write every secret. Now a key whose principal has no policy is denied
+every operation. Give the user or role a policy for what it does, for
+example:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": {
+    "Effect": "Allow",
+    "Action": ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"],
+    "Resource": "arn:aws:secretsmanager:us-east-1:000000000000:secret:myapp/*"
+  }
+}
+```
+
+A denied request is `400 AccessDeniedException` with AWS's message, naming
+the `SecretId` as the request gave it:
+
+```
+User: arn:aws:iam::000000000000:user/dev is not authorized to perform: secretsmanager:GetSecretValue on resource: myapp/config because no identity-based policy allows the secretsmanager:GetSecretValue action
+```
+
+**Cross-account access is refused** until resource-based policies are
+enforced. A principal of another account than `TULE_Store_AccountID`, such
+as a member account's `OrganizationAccountAccessRole` session, is denied
+every operation, since on AWS it would also need a resource policy and every
+account shares this store's secrets.
+
+| Operation | Actions | Resource |
+|---|---|---|
+| `CreateSecret` | `secretsmanager:CreateSecret`, and `secretsmanager:TagResource` when the request has `Tags` | the new secret's ARN, suffix included |
+| `BatchGetSecretValue` | `secretsmanager:BatchGetSecretValue`, then `secretsmanager:GetSecretValue` for each secret | `*`, then each secret |
+| `ListSecrets` | `secretsmanager:ListSecrets` | `*` |
+| every other operation | `secretsmanager:<Operation>` | the secret |
+
+A secret is evaluated on its full ARN, rebuilt from this store's region and
+account, never on the string the request gave. A secret that does not exist
+is evaluated on `arn:aws:secretsmanager:<region>:<account>:secret:<name>`, so
+a caller that may not touch it is denied rather than told it is missing. In
+`BatchGetSecretValue` a secret the caller may not read is reported in
+`Errors` and the others are returned.
+
+The condition keys supplied are the global `aws:SourceIp`,
+`aws:CurrentTime`, `aws:EpochTime`, `aws:SecureTransport`,
+`aws:PrincipalAccount`, `aws:PrincipalArn`, `aws:RequestedRegion`
+(`TULE_Store_Region`) and, for a user, `aws:username`; with an action on a
+secret, `secretsmanager:SecretId`, `secretsmanager:SecretPrimaryRegion` and
+its tags as `aws:ResourceTag/<key>`; and per operation keys such as
+`secretsmanager:Name`, `secretsmanager:VersionStage`,
+`aws:RequestTag/<key>` and `aws:TagKeys`, listed in the README. Tag keys
+that repeat, or differ only by case for an evaluated principal, are refused
+with `InvalidParameterException`. Policies are fetched from identity on every
+request, so a change applies on the next one.
+
+Not enforced: resource-based policies; the role's path in
+`aws:PrincipalArn` for a session, so a condition on a role ARN with a path
+does not match one; `aws:PrincipalTag/*` and `aws:userid`; the KMS, rotation
+and replication keys; permissions boundaries, session policies and SCPs; and
+the check that a tag change leaves the caller its access.
 
 `TULE_Store_Seed` is read as a JSON object: each key is a secret name, and each
 value becomes that secret's value, a JSON string unquoted and anything else
@@ -171,11 +246,14 @@ curl -fsS --aws-sigv4 aws:amz:us-east-1:secretsmanager --user test:test \
 | `ListSecrets` | Paginated, in name order |
 | `ListSecretVersionIds` | Paginated, newest version first |
 | `UpdateSecretVersionStage` | Moves one staging label; moving `AWSCURRENT` carries `AWSPREVIOUS` to the version it left, and a label held by another version needs `RemoveFromVersionId` |
-| `TagResource` / `UntagResource` | Tags are stored and reported, not matchable |
+| `TagResource` / `UntagResource` | Tags are stored and reported, and reach IAM conditions as `aws:ResourceTag/<key>`; list filters on them are refused |
 | `BatchGetSecretValue` | By `SecretIdList`, reporting per-secret errors |
 
 A secret is addressable by name, by its full ARN, or by its ARN without the
-random suffix, as Secrets Manager allows. Both string and binary values round
+random suffix, as Secrets Manager allows. An ARN whose last segment ends in
+a hyphen and six characters is always read as a full ARN, as Secrets
+Manager's troubleshooting guide describes, so use the name or the full ARN
+of a secret whose name ends that way. Both string and binary values round
 trip, and a read reports back whichever kind was written. A value is capped at
 65536 bytes, as on AWS, so a secret that is accepted here is accepted there.
 
@@ -189,13 +267,10 @@ the version already stored, and reusing one with a different value is a
 - **Nothing is encrypted.** Each secret is one JSON file under
   `TULE_Store_RootDir`, named after a hash of the secret's name, holding its
   metadata and every version of its value in the clear.
-- **Every accepted key shares every secret.** The root key, and with an
-  identity endpoint every key identity issued, can read and write every
-  secret. There is no per-account isolation: a key of another account, a
-  role session's included, sees the same secrets, and the ARNs keep
-  `TULE_Store_AccountID` whoever signed. There are no IAM policies, no
-  resource policies and no per-secret permissions, so nothing here tells you
-  whether a deployment's policies are right.
+- **One account's secrets.** There is no per-account isolation, so a
+  principal of another account is refused (see [IAM policies](#iam-policies)),
+  and the ARNs keep `TULE_Store_AccountID`. Identity-based policies are
+  enforced; resource policies are not.
 - **`KmsKeyId` is stored but does nothing.** It is kept with the secret and
   reported back by `DescribeSecret` and `ListSecrets`, so a client sees its own
   setting, and the server logs a warning naming any secret that asks for a key.
@@ -203,6 +278,11 @@ the version already stored, and reusing one with a different value is a
   does not model (`AddReplicaRegions`, `ForceOverwriteReplicaSecret`,
   `RotationToken`) are ignored outright, since the AWS JSON protocol ignores
   unknown fields.
+- **Ambiguous JSON bodies are refused.** A body that names a member twice,
+  regardless of case, or spells a member in another case (`secretId` for
+  `SecretId`) is `SerializationException`, so what a request is authorized
+  on is exactly what it acts on. AWS does not document its handling of
+  either.
 - **No filtering or sorting.** `Filters`, `SortBy` and `SortOrder` are
   rejected with `InvalidParameterException` rather than ignored, so a filtered
   listing never looks like a filter that matched everything. List and filter
@@ -258,6 +338,6 @@ the version already stored, and reusing one with a different value is a
 ## Release and module
 
 This page follows the secret-store README at
-[v0.2.0](https://github.com/tulehq/secret-store/blob/v0.2.0/README.md), released as
-`ghcr.io/tulehq/secret-store:0.2.0`. Its Go module is `tule.dev/secret-store`, with the
+[v0.3.0](https://github.com/tulehq/secret-store/blob/v0.3.0/README.md), released as
+`ghcr.io/tulehq/secret-store:0.3.0`. Its Go module is `tule.dev/secret-store`, with the
 source at [github.com/tulehq/secret-store](https://github.com/tulehq/secret-store).

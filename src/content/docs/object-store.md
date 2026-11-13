@@ -1,6 +1,6 @@
 ---
 title: object-store
-description: "object-store 0.5.0: a local stand-in for S3."
+description: "object-store 0.6.0: a local stand-in for S3."
 ---
 
 An S3-compatible object store that keeps objects on the local filesystem. It is
@@ -19,7 +19,7 @@ With Docker:
 docker run --rm -p 9000:9000 -v s3data:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
   -e TULE_Storage_Buckets=uploads,assets \
-  ghcr.io/tulehq/object-store:0.5.0
+  ghcr.io/tulehq/object-store:0.6.0
 ```
 
 The image is based on Alpine, so `docker exec -it <container> sh` gives you a
@@ -49,7 +49,8 @@ Settings come from environment variables prefixed with `TULE_`, and from a
 | `TULE_Server_Domain` | `localhost` | Enables virtual-hosted-style requests to `<bucket>.<domain>` |
 | `TULE_Auth_AccessKeyID` | required | The access key clients sign requests with |
 | `TULE_Auth_SecretAccessKey` | required | Its secret |
-| `TULE_Auth_IdentityEndpoint` | unset | The [identity](/identity/) service's base URL, such as `http://localhost:9030`, to also accept the keys it issues. Must be an absolute `http` or `https` URL |
+| `TULE_Auth_AccountID` | `000000000000` | The account the configured key and the buckets belong to: identity's management account (`TULE_Identity_AccountID`), 12 digits. Principals of other accounts are refused ([below](#cross-account-access)) |
+| `TULE_Auth_IdentityEndpoint` | unset | The [identity](/identity/) service's base URL, such as `http://localhost:9030`, to also accept the keys it issues and enforce their IAM policies ([below](#permissions)). Must be an absolute `http` or `https` URL; needs identity v0.2.0 or later |
 | `TULE_GasEnv` | | `development` logs at trace level, `testing` disables logging |
 
 The server refuses to start without credentials, and every request must be
@@ -59,8 +60,8 @@ it from using this one.
 
 Those two settings are all it needs: it runs on its own, with no IAM,
 organizations or permissions. To also accept the access keys and STS
-session credentials of the identity service, set
-`TULE_Auth_IdentityEndpoint`. The configured key must then be identity's root
+session credentials of the identity service, and enforce their IAM
+policies, set `TULE_Auth_IdentityEndpoint`. The configured key must then be identity's root
 key, since the server authenticates to identity's signing-key endpoint with
 it. The root key is still checked locally first. Any other key is looked up
 in identity on every request, so a key made inactive or deleted there is
@@ -68,6 +69,97 @@ refused on the next one with `403 InvalidAccessKeyId`. A lookup that fails,
 such as identity being unreachable or not answering within 10 seconds, fails
 the request with `500 InternalError`; it is never treated as an unknown key
 or as a valid one.
+
+## Permissions
+
+Without `TULE_Auth_IdentityEndpoint` nothing is evaluated: the configured key
+is the account's root and may do everything.
+
+With it, every request signed with a key identity issued, an IAM user's
+access key or a role session's credentials, is evaluated against that
+principal's identity-based policies as identity reports them on each
+request: its inline policies and the default versions of its attached
+managed policies, or a session's role's. An explicit `Deny` wins; otherwise
+the request needs an `Allow`. The configured key, identity's root key, is
+never evaluated, and neither is identity's root principal of
+`TULE_Auth_AccountID`. A presigned URL is evaluated as the principal that
+signed it.
+
+**Breaking change:** up to v0.5.0 any key identity issued could do
+everything. Now an IAM user or role with no policy that allows S3 actions is
+denied every request. Give it a policy, such as one allowing `s3:*` on `*`,
+or attach `arn:aws:iam::aws:policy/AdministratorAccess`; see
+[Identity and keys](/guides/identity/#policies).
+
+A refused request is `403 AccessDenied` with the message S3 returns for a
+same-account request:
+
+```
+User: arn:aws:iam::000000000000:user/dev is not authorized to perform: s3:GetObject on resource: "arn:aws:s3:::bkt/key" because no identity-based policy allows the s3:GetObject action
+```
+
+A HEAD request's 403 has no body, as on S3, and a key DeleteObjects may not
+delete gets its own `AccessDenied` entry in the result. A GetObject,
+HeadObject or CopyObject of an object that does not exist answers `404
+NoSuchKey` only to a caller allowed `s3:ListBucket` on the bucket, and `403
+AccessDenied` naming `s3:ListBucket` to any other. A bucket name over 63
+characters (`400 InvalidBucketName`) and a key over 1024 bytes (`400
+KeyTooLongError`) are refused for every caller before any evaluation.
+
+### Cross-account access
+
+A principal of an account other than `TULE_Auth_AccountID`, such as an
+`OrganizationAccountAccessRole` session in a member account, is refused
+every request, even one its identity policies allow, "because no
+resource-based policy allows" the action. On AWS a cross-account request
+also needs a resource-based policy such as a bucket policy; this server
+evaluates none, and since buckets are not isolated by account, allowing it
+would let any member account's administrator reach every bucket.
+
+### Actions and resources
+
+Each operation is evaluated as the actions and resource types the
+[Service Authorization Reference for S3](https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazons3.html)
+lists for it, on `arn:aws:s3:::<bucket>` or `arn:aws:s3:::<bucket>/<key>`:
+
+| Operation | Action | Resource |
+|---|---|---|
+| ListBuckets | `s3:ListAllMyBuckets` | `*` |
+| CreateBucket | `s3:CreateBucket` | bucket |
+| HeadBucket | `s3:ListBucket` | bucket |
+| DeleteBucket | `s3:DeleteBucket` | bucket |
+| GetBucketLocation | `s3:GetBucketLocation` | bucket |
+| GetBucketVersioning | `s3:GetBucketVersioning` | bucket |
+| ListObjects, ListObjectsV2 | `s3:ListBucket` | bucket |
+| ListMultipartUploads | `s3:ListBucketMultipartUploads` | bucket |
+| GetObject, HeadObject | `s3:GetObject` | object |
+| PutObject | `s3:PutObject` | object |
+| CopyObject | `s3:PutObject`, then `s3:GetObject` | destination, then source object |
+| DeleteObject, DeleteObjects | `s3:DeleteObject` | object, each key for DeleteObjects |
+| CreateMultipartUpload, UploadPart, CompleteMultipartUpload | `s3:PutObject` | object |
+| AbortMultipartUpload | `s3:AbortMultipartUpload` | object |
+| ListParts | `s3:ListMultipartUploadParts` | object |
+
+A request for something not implemented (`501 NotImplemented`) is refused
+before it is evaluated.
+
+The global condition keys supplied are `aws:SourceIp` (the TCP peer),
+`aws:CurrentTime`, `aws:EpochTime`, `aws:SecureTransport`,
+`aws:RequestedRegion` (always `us-east-1`), `aws:PrincipalAccount`,
+`aws:PrincipalType`, `aws:PrincipalArn` and, for IAM users, `aws:username`;
+they fill policy variables too. S3 keys such as `s3:prefix`,
+`s3:x-amz-acl`, `s3:x-amz-copy-source`, `s3:if-none-match`, `s3:authType`
+and `s3:signatureversion` are supplied for the actions the reference lists
+them for, when the request carries a value; the README lists them all. A
+value over 4096 bytes is refused with `400 InvalidArgument`.
+
+The gaps, as the README lists them: `aws:PrincipalArn` for a role session is
+the role's ARN without its path, so a condition on a role ARN with a path
+does not match a session; `aws:userid`, `aws:PrincipalTag/*`,
+`aws:ResourceTag/*` and the S3 keys not listed are not supplied; ACL,
+tagging and object lock headers on a write are ignored, so such a write
+needs only `s3:PutObject`; and resource-based policies, permissions
+boundaries, session policies and SCPs are not evaluated.
 
 ## Health checks
 
@@ -134,8 +226,9 @@ any origin, and response headers such as `ETag` are exposed.
 
 - **Keys.** Keys are opaque strings, as on S3: `a` and `a/b` coexist, and
   folder markers and `.` or `..` segments are ordinary keys. A key must be 1
-  to 1024 bytes of valid UTF-8 and must not end in a `.` segment (`a/.`);
-  other keys are rejected with `400 InvalidArgument`.
+  to 1024 bytes of valid UTF-8 and must not end in a `.` segment (`a/.`).
+  A longer key is rejected with `400 KeyTooLongError`, as on S3; other
+  invalid keys with `400 InvalidArgument`.
 - **Storage layout.** Objects are stored by the gas `storage/dir` backend
   under hashed names, so the storage root is not browsable as files.
   Directories written by earlier versions are not readable by this one, and
@@ -150,7 +243,7 @@ any origin, and response headers such as `ETag` are exposed.
     ghcr.io/tulehq/object-store:0.3.1
   docker run -d --name new -p 9001:9000 -v s3data-new:/data \
     -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
-    ghcr.io/tulehq/object-store:0.5.0
+    ghcr.io/tulehq/object-store:0.6.0
   export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1
   for b in $(aws s3 ls --endpoint-url http://localhost:9000 | awk '{print $3}'); do
     aws s3 sync "s3://$b" "copy/$b" --endpoint-url http://localhost:9000
@@ -191,10 +284,11 @@ any origin, and response headers such as `ETag` are exposed.
     `x-amz-content-sha256` is verified before it is acted on; one sent as
     `UNSIGNED-PAYLOAD` or `STREAMING-UNSIGNED-PAYLOAD-TRAILER` is read as
     sent, as on S3.
-- **Every key shares all the data.** The root key and every key from
-  identity, whichever account it belongs to, see and change the same buckets
-  and objects. There is no per-account isolation, and no permissions or
-  policies: an accepted key may do everything.
+- **Every key shares all the data.** The root key and every key identity
+  issued in `TULE_Auth_AccountID` see and change the same buckets and
+  objects, as far as their identity policies allow. Keys of other accounts
+  are refused. There is no per-account isolation, and no resource-based
+  policies ([Permissions](#permissions)).
 - **Presigned DeleteObjects and CompleteMultipartUpload URLs sign no body**,
   as on S3. Whoever holds such a URL chooses the document it sends, so the
   URL is a bearer grant over every key in the bucket for that operation:
@@ -210,6 +304,6 @@ any origin, and response headers such as `ETag` are exposed.
 ## Release and module
 
 This page follows the object-store README at
-[v0.5.0](https://github.com/tulehq/object-store/blob/v0.5.0/README.md), released as
-`ghcr.io/tulehq/object-store:0.5.0`. Its Go module is `tule.dev/object-store`, with the
+[v0.6.0](https://github.com/tulehq/object-store/blob/v0.6.0/README.md), released as
+`ghcr.io/tulehq/object-store:0.6.0`. Its Go module is `tule.dev/object-store`, with the
 source at [github.com/tulehq/object-store](https://github.com/tulehq/object-store).
