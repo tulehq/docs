@@ -36,6 +36,16 @@ export const modules = [
 		description: 'IAM and STS-compatible users, access keys and role sessions.',
 	},
 	{
+		name: 'mailbox',
+		repo: 'https://github.com/tulehq/mailbox',
+		description: 'SES v2-compatible mail that is stored for retrieval, never delivered.',
+	},
+	{
+		name: 'queues',
+		repo: 'https://github.com/tulehq/queues',
+		description: 'SQS-compatible standard and FIFO queues.',
+	},
+	{
 		name: 'sigv4',
 		repo: 'https://github.com/tulehq/sigv4',
 		description: 'Shared AWS Signature Version 4 verification.',
