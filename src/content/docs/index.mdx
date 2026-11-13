@@ -1,7 +1,6 @@
 ---
 title: Tule
-description: Tule runs local drop-in replacements for AWS services.
-template: splash
+description: Local drop-in replacements for AWS services, for development and end-to-end tests.
 tableOfContents: false
 editUrl: false
 prev: false
@@ -10,9 +9,47 @@ next: false
 
 import { modulePath, modules } from '../../modules.mjs';
 
-Tule runs local drop-in replacements for AWS services.
+Tule is a set of local stand-ins for AWS services, built for local development
+and end-to-end tests. Each service speaks the AWS API it replaces, so an AWS
+SDK, the AWS CLI or a Gas app points at it with an endpoint setting and no code
+changes. Each one is released as an image on `ghcr.io/tulehq`.
 
-## Modules
+None of them is a production service: data lives in local files or SQLite
+databases on one machine, nothing is encrypted, and there are no IAM policies.
+
+## Services
+
+| Service | Stands in for | Image | Port |
+|---|---|---|---|
+| [object-store](/object-store/) | S3 | `ghcr.io/tulehq/object-store:0.5.0` | 9000 |
+| [secret-store](/secret-store/) | Secrets Manager | `ghcr.io/tulehq/secret-store:0.2.0` | 9010 |
+| [accounts](/accounts/) | Organizations | `ghcr.io/tulehq/accounts:0.2.0` | 9020 |
+| [identity](/identity/) | IAM and STS | `ghcr.io/tulehq/identity:0.1.0` | 9030 |
+| [mailbox](/mailbox/) | SES v2 (stores mail, never delivers it) | `ghcr.io/tulehq/mailbox:0.1.0` | 9040 |
+| [queues](/queues/) | SQS, standard and FIFO | `ghcr.io/tulehq/queues:0.1.0` | 9050 |
+| [functions](/functions/) | Lambda, container images run through Docker | `ghcr.io/tulehq/functions:0.1.1` | 9060, 9061 |
+| [console](/console/) | The AWS console: a web UI over the other services | `ghcr.io/tulehq/console:0.1.0` | 9070 |
+
+The Go libraries the services share are [sigv4](/sigv4/) (SigV4 verification)
+and [policy](/policy/) (unreleased).
+
+## Two ways to run it
+
+**One service alone.** Each service runs on its own with one static access key,
+set with `TULE_Auth_AccessKeyID` and `TULE_Auth_SecretAccessKey`. Every request
+must be signed with that key. Use this when an app needs one AWS service, such
+as object-store for an app that only uses S3. See
+[One service alone](/getting-started/one-service/).
+
+**The whole stack.** Every service and the console run together in Docker
+Compose, with one root key everywhere and every service pointed at identity,
+so the users, access keys and role sessions identity issues work on all of
+them. See [The full stack](/getting-started/full-stack/) and
+[Identity and keys](/guides/identity/).
+
+## Go modules
+
+Every service and library is a Go module under `tule.dev`:
 
 <ul>
 	{modules.map((m) => (

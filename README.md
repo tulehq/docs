@@ -1,8 +1,8 @@
 # tule.dev
 
 The site at https://tule.dev, built with [Starlight](https://starlight.astro.build)
-and served from GitHub Pages. Its main job is the Go vanity import metadata
-that lets `go get tule.dev/<module>` resolve: every page carries a
+and served from GitHub Pages: the Tule documentation, and the Go vanity import
+metadata that lets `go get tule.dev/<module>` resolve. Every page carries a
 `go-import` and a `go-source` tag for every module.
 
 ## Run it locally
@@ -13,7 +13,7 @@ Needs Node 22.23.4 or later and pnpm 12.11.2, the version pinned by
 ```sh
 pnpm install
 pnpm dev               # http://localhost:4321
-pnpm build             # writes dist/
+pnpm build             # writes dist/ and checks every internal link
 pnpm check-go-import   # checks the go-import and go-source tags in dist/
 pnpm preview           # serves dist/
 ```
@@ -34,9 +34,11 @@ Add an entry to `modules` in `src/modules.mjs`:
 },
 ```
 
-That gives the module a landing page at `/queue/`, a sidebar link, a line on
-the home page, and its `go-import` and `go-source` tags on every page.
-`pnpm check-go-import` checks for the new module's tags too.
+That puts the module's `go-import` and `go-source` tags on every page and a
+line on the home page. Then write its page, `src/content/docs/<name>.md`,
+which serves `/<name>/`, and add it to the sidebar in `astro.config.mjs`.
+`pnpm check-go-import` checks the new module's tags, and fails when its page
+is missing.
 
 ## Deploy
 
