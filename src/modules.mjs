@@ -56,6 +56,11 @@ export const modules = [
 		description: 'A web console for every Tule service.',
 	},
 	{
+		name: 'policy',
+		repo: 'https://github.com/tulehq/policy',
+		description: 'IAM policy parsing and evaluation.',
+	},
+	{
 		name: 'sigv4',
 		repo: 'https://github.com/tulehq/sigv4',
 		description: 'Shared AWS Signature Version 4 verification.',
