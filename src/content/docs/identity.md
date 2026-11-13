@@ -1,21 +1,26 @@
 ---
 title: identity
-description: "identity 0.1.0: a local stand-in for IAM and STS."
+description: "identity 0.4.0: a local stand-in for IAM and STS."
 ---
 
-An AWS IAM- and STS-compatible identity service that keeps users, access keys
-and role sessions in a local SQLite database. It is built to stand in for IAM
-and STS in local development and end-to-end tests: point an AWS SDK at it and
-the usual user, access key, caller identity and AssumeRole calls work.
+An AWS IAM- and STS-compatible identity service that keeps users, roles,
+managed and inline policies, access keys and role sessions in a local SQLite
+database. It is built to stand in for IAM and STS in local development and
+end-to-end tests: point an AWS SDK at it and the usual user, role, policy,
+access key, caller identity and AssumeRole calls work, and identity policies
+decide who may do what.
 
 It also issues the keys the other Tule services verify. A service asks
 identity's [signing-key endpoint](#the-signing-key-endpoint) for the SigV4
 signing key of a request's credential and checks the signature itself, so a
-key created here works against every Tule service.
+key created here works against every Tule service, and the service
+evaluates the key's policies, which the endpoint hands over with it. A
+service assumes a role as an AWS service, such as a function's execution
+role, through the [assume-role endpoint](#the-assume-role-endpoint).
 
-It is not a production identity service. There are no policies: who may do
-what is decided by the fixed rules [below](#principals-and-permissions), and
-secrets are stored as they are.
+It is not a production identity service: secrets are stored as they are, and
+only identity-based policies and role trust policies are evaluated
+([below](#principals-and-permissions)).
 
 ## Running it
 
@@ -25,7 +30,7 @@ With Docker:
 docker run --rm -p 9030:9030 -v identitydata:/data \
   -e TULE_Auth_AccessKeyID=AKIAIOSFODNN7EXAMPLE \
   -e TULE_Auth_SecretAccessKey=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
-  ghcr.io/tulehq/identity:0.1.0
+  ghcr.io/tulehq/identity:0.4.0
 ```
 
 The image is based on Alpine, so `docker exec -it <container> sh` gives you a
@@ -59,7 +64,7 @@ Settings come from environment variables prefixed with `TULE_`, and from a
 | `TULE_Auth_AccessKeyID` | required | The root user's access key ID, the key every Tule service is configured with |
 | `TULE_Auth_SecretAccessKey` | required | Its secret |
 | `TULE_Identity_AccountID` | `000000000000` | The management account, the root user's: 12 digits. The default is accounts' default management account |
-| `TULE_Identity_AccountsEndpoint` | unset | The accounts service's base URL, such as `http://localhost:9020`, which `AssumeRole` asks about member accounts. Unset, no role can be assumed |
+| `TULE_Identity_AccountsEndpoint` | unset | The accounts service's base URL, such as `http://localhost:9020`, which `AssumeRole` asks about member accounts. Unset, only roles of the caller's own account can be assumed |
 | `TULE_HSTS_MaxAge` | unset | `Strict-Transport-Security` max age; the header is only sent when set |
 | `TULE_Server_ReadTimeout` | `30s` | How long the server may take to read a request, body included |
 | `TULE_Server_ReadHeaderTimeout` | `30s` | How long it may take to read a request's headers; must be positive |
@@ -130,7 +135,7 @@ IAM (`2010-05-08`):
 | `CreateUser` | `Path` defaults to `/`. Names are unique in the account without regard to case. Takes `Tags` |
 | `GetUser` | With its tags. Without `UserName`, the caller: the root user for the root key |
 | `ListUsers` | Filtered by `PathPrefix`, paginated with `Marker` and `MaxItems` |
-| `DeleteUser` | Fails with `DeleteConflict` while the IAM user has access keys |
+| `DeleteUser` | Fails with `DeleteConflict` while the IAM user has access keys, attached policies or inline policies |
 | `CreateAccessKey` | The only response that carries the secret. At most two keys per user, then `LimitExceeded` |
 | `ListAccessKeys` | Paginated. Without `UserName`, the root key lists itself |
 | `UpdateAccessKey` | `Active` or `Inactive` |
@@ -138,23 +143,50 @@ IAM (`2010-05-08`):
 | `GetAccessKeyLastUsed` | For a user's key or the root user's |
 | `TagUser` / `UntagUser` | At most 50 tags on a user |
 | `ListUserTags` | Paginated, in order of their keys |
+| `CreatePolicy` | A customer managed policy; its document is `v1`, the default. Takes `Path`, `Description` and `Tags` |
+| `GetPolicy` | With its tags. `AttachmentCount` counts the calling account's users and roles |
+| `ListPolicies` | `Scope` (`All`, `AWS`, `Local`), `OnlyAttached`, `PathPrefix`, paginated |
+| `DeletePolicy` | Fails with `DeleteConflict` while attached, or while it has versions besides its default |
+| `CreatePolicyVersion` | At most 5 versions, then `LimitExceeded`. `SetAsDefault` makes it the default |
+| `GetPolicyVersion` / `ListPolicyVersions` / `DeletePolicyVersion` / `SetDefaultPolicyVersion` | The default version cannot be deleted: `DeleteConflict` |
+| `AttachUserPolicy` / `DetachUserPolicy` / `ListAttachedUserPolicies` | A customer managed policy of the account or an AWS managed one. At most 10 per user |
+| `PutUserPolicy` / `GetUserPolicy` / `ListUserPolicies` / `DeleteUserPolicy` | Inline policies; together at most 2,048 characters per user, white space excluded |
+| `CreateRole` | `AssumeRolePolicyDocument` (the trust policy), `Path`, `Description`, `MaxSessionDuration` (3600 to 43200, default 3600) and `Tags` |
+| `GetRole` / `ListRoles` | With the trust policy, URL-encoded |
+| `UpdateRole` / `UpdateAssumeRolePolicy` | `Description` and `MaxSessionDuration`; the trust policy |
+| `DeleteRole` | Fails with `DeleteConflict` while the role has policies. Its sessions are orphaned: see [Differences](#differences-from-aws) |
+| `AttachRolePolicy` / `DetachRolePolicy` / `ListAttachedRolePolicies` | As for users; at most 20 per role |
+| `PutRolePolicy` / `GetRolePolicy` / `ListRolePolicies` / `DeleteRolePolicy` | As for users; together at most 10,240 characters per role |
+
+User, role and managed policy names are unique in the account without regard
+to case. One AWS managed policy is shipped,
+`arn:aws:iam::aws:policy/AdministratorAccess`, with AWS's document; every
+account can see and attach it, and nobody can change or delete it.
+
+A policy document is checked against the IAM policy grammar by
+[tule.dev/policy](/policy/), and one that breaks it fails with
+`MalformedPolicyDocument`. An identity policy may not name a `Principal`; a
+trust policy must. Documents are stored and returned as they were sent, and
+a managed policy is at most 6,144 characters without white space.
 
 STS (`2011-06-15`):
 
 | Operation | Notes |
 |---|---|
-| `GetCallerIdentity` | Any active principal |
-| `GetAccessKeyInfo` | The account of any key this service issued, the root user's included, whatever its status |
-| `AssumeRole` | `OrganizationAccountAccessRole` only, below |
+| `GetCallerIdentity` | Any active principal, whatever its policies |
+| `GetAccessKeyInfo` | The account of any key this service issued, the root user's included, whatever its status. Needs `sts:GetAccessKeyInfo` |
+| `AssumeRole` | Any role whose trust policy allows the caller, [below](#assumerole) |
 
 IDs have AWS's formats: `AIDA` and 17 base32 characters for a user (21 in
-all), `AKIA` and 16 for an access key, `ASIA` and 16 for a role session's
-key, `AROA` and 17 for the role, and a secret is 40 characters of the base64
-alphabet. A user's ARN is `arn:aws:iam::<account>:user<path><name>`; a role
-session's is
-`arn:aws:sts::<account>:assumed-role/OrganizationAccountAccessRole/<session>`
-and its `UserId` is `<role ID>:<session>`; the root user's is
-`arn:aws:iam::<account>:root` and its `UserId` is the account ID.
+all), `AROA` and 17 for a role, `ANPA` and 17 for a managed policy, `AKIA`
+and 16 for an access key, `ASIA` and 16 for a role session's key, and a
+secret is 40 characters of the base64 alphabet. A user's ARN is
+`arn:aws:iam::<account>:user<path><name>`, a role's
+`arn:aws:iam::<account>:role<path><name>` and a managed policy's
+`arn:aws:iam::<account>:policy<path><name>`; a role session's is
+`arn:aws:sts::<account>:assumed-role/<role name>/<session>` and its `UserId`
+is `<role ID>:<session>`; the root user's is `arn:aws:iam::<account>:root`
+and its `UserId` is the account ID.
 
 Request parameters are checked against the lengths, patterns, ranges and
 enumerations of the IAM and STS models, and a value that breaks one fails with
@@ -170,7 +202,10 @@ characters and a value of 0 to 256, of letters, digits, spaces and
 fails with `LimitExceeded` and sets none; no key or value that begins with
 `aws:`, which is `InvalidInput`. A user's tag keys are not case sensitive but
 keep their case: tagging `env` on a user tagged `Env` replaces that tag, and
-a request that names a key twice is `InvalidInput`.
+a request that names a key twice is `InvalidInput`. Case is folded beyond
+ASCII, by Unicode simple case folding, so `Ä` and `ä` are one key too; the
+IAM User Guide does not say how non-ASCII letters fold, so that is this
+service's choice.
 
 ## Principals and permissions
 
@@ -182,17 +217,39 @@ There are three kinds of principal:
 - **Role sessions** from `AssumeRole`, with an access key, a secret, a session
   token and an expiration. A session acts in its role's account.
 
-With no policies, the rules are fixed:
+Requests are authorized by policy, as AWS authorizes them within an account:
 
-- The IAM operations may be called by an **admin principal** only: the root
-  user, and `OrganizationAccountAccessRole` sessions. Each acts in its own
-  account: users the root user creates are the management account's, users a
-  session creates are its member account's. Anyone else, an IAM user, gets
-  `AccessDenied` (`403`), "User: \<arn\> is not authorized to perform:
-  iam:\<action\> on resource: \<arn\>".
-- Every active principal may call `GetCallerIdentity` and `GetAccessKeyInfo`,
-  and every active key works against the other Tule services.
-- `AssumeRole` may be called by the root user only.
+- **The root user** is always allowed, and is never evaluated against
+  policies.
+- **Every other principal** is evaluated on every IAM and STS request against
+  its identity policies: a user's inline policies and the default versions of
+  its attached managed policies, or a session's role's, as they are at the
+  time of the request. An explicit `Deny` wins; otherwise the request needs
+  an `Allow`. A request no policy allows is `AccessDenied` (`403`), "User:
+  \<arn\> is not authorized to perform: \<action\> on resource: \<arn\>
+  because no identity-based policy allows the \<action\> action", or "...
+  with an explicit deny in an identity-based policy". A user or role with no
+  policy is denied everything but `GetCallerIdentity`.
+- **`GetCallerIdentity`** is always allowed, as AWS documents: it needs no
+  permission and an explicit deny does not stop it.
+
+Each operation is evaluated as the action and resource the Service
+Authorization Reference lists for it, `iam:<Operation>` or
+`sts:<Operation>` on the user, role or policy it names, such as
+`iam:CreateUser` on `arn:aws:iam::<account>:user/<path><name>`; `ListUsers`,
+`ListRoles`, `ListPolicies` and `GetAccessKeyInfo` are evaluated on `*`. The
+condition keys supplied are `aws:PrincipalArn`, `aws:PrincipalAccount`,
+`aws:PrincipalType`, `aws:userid`, `aws:username` (users), `aws:SourceIp`,
+`aws:CurrentTime`, `aws:EpochTime`, `aws:SecureTransport`,
+`aws:RequestedRegion` (always `us-east-1`) and `aws:PrincipalTag/<key>`,
+plus `iam:PolicyARN` for the attach and detach operations,
+`sts:RoleSessionName` for `AssumeRole`, and the tag keys under
+[Differences](#differences-from-aws). They fill policy variables such as
+`${aws:username}` too.
+
+Each principal acts in its own account: users the root user creates are the
+management account's, users a member account's session creates are that
+account's.
 
 An inactive or deleted key, and a session's key without its token, are
 refused with `InvalidClientTokenId`, as AWS refuses an invalid key; an expired
@@ -217,22 +274,42 @@ credentials".
 
 ### AssumeRole
 
-Only `arn:aws:iam::<account>:role/OrganizationAccountAccessRole` can be
-assumed, where `<account>` is an `ACTIVE` member of the organization other
-than the management account, by the root user. identity asks the accounts
-service, with Organizations calls signed with the root user's key: which
-account manages the organization (`DescribeOrganization`), and whether the
-account is an active member (`DescribeAccount`). The management account
-accounts reports must be `TULE_Identity_AccountID`, the root user's; when it
-is not, `AssumeRole` fails with `500` `InternalFailure` naming both, and the
-mismatch is logged, since no answer would be right. Any other role, account or caller, and
-every role when no accounts endpoint is configured, is refused with
-`AccessDenied`, as AWS refuses a role that does not exist.
+A role can be assumed when its trust policy allows the caller (`AWS`
+principals: the account ID, its root ARN, a user ARN, a role ARN, which a
+session of that role matches, or `*`), and:
+
+- the caller's own identity policies allow `sts:AssumeRole` on the role's
+  ARN, unless the caller is the root user. Within the caller's account a
+  trust policy that names the caller directly, by its user, role or session
+  ARN or by `*`, is enough on its own; one that names only the account is
+  not. An explicit `Deny` in the caller's policies always refuses.
+- the role is in the caller's account, or the caller is in the
+  organization's management account and the role is in an `ACTIVE` member
+  account.
+
+Role names are matched with their case. Anything else, a role that does not
+exist included, is `AccessDenied`, as AWS refuses a role that does not exist.
+
+For a member account, identity asks the accounts service, with Organizations
+calls signed with the root user's key, which account manages the
+organization and whether the account is an active member. The management
+account accounts reports must be `TULE_Identity_AccountID`; when it is not,
+the root user's `AssumeRole` into a member account fails with `500`
+`InternalFailure` naming both. Without an accounts endpoint only roles of
+the caller's own account can be assumed.
+
+`OrganizationAccountAccessRole` is created in a member account once, by the
+first `AssumeRole` of it from the management account that passes every
+check, as Organizations would have created it with the account: path `/`, a
+maximum session duration of an hour, a trust policy for
+`arn:aws:iam::<management>:root`, and `AdministratorAccess` attached. It is
+an ordinary role after that, and can be changed or deleted; a deleted one is
+never created again.
 
 `DurationSeconds` is 900 to 43200 by the model and defaults to 3600; more
-than 3600, the maximum session duration of a role created with no other
-setting, fails with `ValidationError`. The session expires then: its token is
-refused with `ExpiredToken` from that moment.
+than the role's `MaxSessionDuration` fails with `ValidationError`. The
+session expires then: its token is refused with `ExpiredToken` from that
+moment. A session carries its role's policies, as they are at each request.
 
 ## The signing-key endpoint
 
@@ -244,24 +321,56 @@ uses, since those are all `POST /`.
   signing name `identity` in `us-east-1`. Anything else is refused, `403`
   with the sigv4 Kind as the code, before the body is read.
 - **Request.** The credential scope of the request the caller wants to verify,
-  as JSON:
+  and the endpoint version it speaks, as JSON:
 
   ```json
   {"AccessKeyId": "AKIA...", "SessionToken": "...", "Date": "20261113",
-   "Region": "us-east-1", "Service": "secretsmanager"}
+   "Region": "us-east-1", "Service": "secretsmanager", "Version": 3}
   ```
 
-  `SessionToken` is left out when the request carries none.
+  `SessionToken` is left out when the request carries none. Each request is
+  answered at the version it asks for: 3 for the current client, 2 for the
+  v0.2.0 to v0.3.1 clients, and without `Version`, as the v0.1.0 client
+  sends it, as v0.1.0 answered. A request above 3 is answered at 3.
 - **Response.** `200` with the derived signing key for that date, region and
   service, base64-encoded, and the principal the key belongs to. It never
-  returns a secret:
+  returns a secret. At version 2 the principal also carries `Root`, true for
+  the root user's key, which is never evaluated against policies, and
+  `Policies`, the identity policy documents in effect for anyone else
+  (inline, then the default versions of the attached managed policies; a
+  session's are its role's). At version 3 it also carries the values of its
+  condition keys, as AWS gives them:
+
+  | Field | Condition key | IAM user | Role session | Root user |
+  | --- | --- | --- | --- | --- |
+  | `PrincipalArn` | `aws:PrincipalArn` | its ARN, with its path | its role's ARN, with the role's path | `arn:aws:iam::<account>:root` |
+  | `UserId` | `aws:userid` | its unique ID, `AIDA...` | `<role ID>:<session name>` | the account ID |
+  | `PrincipalType` | `aws:PrincipalType` | `User` | `AssumedRole` | `Account` |
+  | `Tags` | `aws:PrincipalTag/<key>` | its tags | its role's tags | none |
 
   ```json
   {"Principal": {"AccountId": "000000000000",
-                 "Arn": "arn:aws:iam::000000000000:user/dev",
-                 "AccessKeyId": "AKIA..."},
-   "SigningKey": "..."}
+                 "Arn": "arn:aws:sts::000000000000:assumed-role/deployer/release-42",
+                 "PrincipalArn": "arn:aws:iam::000000000000:role/app/deployer",
+                 "UserId": "AROA...:release-42",
+                 "PrincipalType": "AssumedRole",
+                 "Tags": {"Project": "pegasus"},
+                 "AccessKeyId": "ASIA...",
+                 "Policies": [{"Version": "2012-10-17", "Statement": [...]}]},
+   "SigningKey": "...",
+   "Version": 3}
   ```
+
+  A session's `Arn` names its role without the role's path, so
+  `PrincipalArn` is where its role's ARN is found.
+- **A session whose role no longer exists.** A session is bound to its
+  role's unique ID, so once the role is deleted the session has no role,
+  even when a role of the same name is created again. It is answered with
+  `PrincipalType` `AssumedRole`, its `UserId`, and no `PrincipalArn`, tags or
+  policies. A service must then supply `aws:PrincipalArn` to its policy
+  evaluator as an empty slice, and must never derive it from the
+  assumed-role ARN, which still names the role; nor may the session match
+  the role's ARN in a resource-based policy's `Principal`.
 
 - **Refusals.** `400` with a `Code` of `UnknownAccessKey` (unknown or deleted,
   or a session key without its token), `InactiveAccessKey`,
@@ -291,41 +400,125 @@ It maps the refusals to `sigv4.ErrUnknownAccessKey`,
 verifier answers them as it answers its own; `InactiveAccessKey` becomes
 `keysource.ErrInactiveAccessKey`, which wraps `sigv4.ErrUnknownAccessKey`. Any
 other failure is a `*keysource.Error` or a transport error, which a verifier
-reports as `KindKeyLookupFailed`. It caches nothing: every verification asks
-identity, so a key deactivated or deleted is refused on the next request.
+reports as `KindKeyLookupFailed`. It asks for version 3 and fills
+`sigv4.Principal.Root`, `Policies`, `PrincipalARN`, `UserID`, `Type` and
+`Tags` from the answer; an identity that answers below version 3, v0.3.1 or
+earlier, is a `*keysource.Error` with the code `VersionUnsupported`. It also
+refuses, with the code `InvalidResponse`, a principal that breaks the
+contract, such as one with more than 50 tags. It caches nothing: every
+verification asks identity, so a key deactivated or deleted is refused on
+the next request.
+
+## The assume-role endpoint
+
+An internal endpoint, not an AWS API, through which a Tule service assumes a
+role as an AWS service principal, as Lambda assumes a function's execution
+role. `AssumeRole` matches a trust policy against the caller's ARN, and no
+caller is a service, so a role that trusts
+`{"Service": "lambda.amazonaws.com"}` is assumed through this endpoint
+instead. It is `POST /_internal/assume-role`.
+
+- **Authentication.** As the signing-key endpoint's: SigV4 with the root
+  user's key, for the signing name `identity` in `us-east-1`.
+- **Request.**
+
+  ```json
+  {"RoleArn": "arn:aws:iam::000000000000:role/fn-exec",
+   "RoleSessionName": "invocation", "ServicePrincipal": "lambda.amazonaws.com",
+   "SourceArn": "arn:aws:lambda:us-east-1:000000000000:function:fn",
+   "SourceAccount": "000000000000", "DurationSeconds": 900}
+  ```
+
+  `ServicePrincipal` ends in `.amazonaws.com`. `DurationSeconds` is 900 to
+  43200 and at most the role's `MaxSessionDuration`, or left out for an
+  hour. `SourceArn` and `SourceAccount`, the resource the service acts for
+  and its account, are optional.
+- **Evaluation.** The role's trust policy must allow the service principal
+  `sts:AssumeRole`, with `aws:SourceArn` and `aws:SourceAccount` from the
+  request, so a trust policy can guard against the confused deputy problem.
+  Identity policies are not evaluated, as a service principal has none.
+  Nothing about the role changes.
+- **Response.** `200` with an ordinary session of the role, which carries the
+  role's policies, as an `AssumeRole` session does: `Credentials` and
+  `AssumedRoleUser`, as STS returns them.
+- **Refusals.** `404` `NoSuchRole`, `403` `NotTrusted` (the trust policy does
+  not allow the service), `400` `InvalidDuration`, and `400` `InvalidRequest`
+  for a body that is not a request. A failure of the store is `500`.
+
+### The service role client
+
+`tule.dev/identity/servicerole` is the endpoint's client:
+
+```go
+c, err := servicerole.New(servicerole.Config{
+	Endpoint:        "http://localhost:9030",
+	AccessKeyID:     rootKeyID,
+	SecretAccessKey: rootSecret,
+})
+s, err := c.AssumeServiceRole(ctx, roleARN, "invocation", "lambda.amazonaws.com",
+	15*time.Minute, servicerole.WithSourceArn(functionARN),
+	servicerole.WithSourceAccount(accountID))
+```
+
+It returns `servicerole.ErrNoSuchRole`, `ErrNotTrusted` and
+`ErrInvalidDuration` for those refusals, and a `*servicerole.Error` or a
+transport error otherwise.
 
 ## Differences from AWS
 
-- **No policies.** Permissions are the fixed rules above: admin principals may
-  call every IAM operation in their account, IAM users none, and every active
-  key works against every Tule service. Nothing here tells you whether a
-  deployment's IAM policies are right. `AccessDenied` messages carry AWS's
-  form without its policy explanation.
-- **Users, their access keys and their tags only.** Groups, roles as IAM
-  resources, policies, login profiles, MFA, SSH keys, certificates and every
-  other IAM operation, and every STS operation but the three above, answer as
-  an action AWS does not know: `400` `InvalidAction`. So does an IAM operation signed for `sts`,
-  or the other way round, and a request whose `Version` is not the service's.
-- **One role.** `AssumeRole` assumes `OrganizationAccountAccessRole` in a
-  member account and nothing else. accounts records the `RoleName` given to
-  `CreateAccount`, but the Organizations API does not expose it, so the role
-  always has the AWS default name. The role's maximum session duration is one
-  hour. Only the root user may assume it, and role chaining is not possible.
+- **Identity policies and trust policies only.** Permissions boundaries,
+  session policies, service control policies and groups are not part of
+  evaluation; resource-based policies of other services are not evaluated
+  here. Policy evaluation is [tule.dev/policy](/policy/)'s.
+- **Users, roles, managed and inline policies and access keys only.** Groups,
+  instance profiles, login profiles, MFA, SSH keys, certificates, policy and
+  role tagging operations, `ListEntitiesForPolicy`, and every other IAM
+  operation, and every STS operation but the three above, answer as an action
+  AWS does not know: `400` `InvalidAction`. So does an IAM operation signed
+  for `sts`, or the other way round, and a request whose `Version` is not the
+  service's.
+- **One AWS managed policy.** Only `AdministratorAccess` is shipped.
+- **The root user may call `AssumeRole`.** AWS refuses root credentials;
+  here the root user is how a member account is first reached. Role chaining
+  works as the trust policies allow, for an hour at most, as AWS limits it.
   A session stays valid until it expires even if its account is closed.
-- **Some parameters are refused or not acted on.** `CreateUser` refuses
-  `PermissionsBoundary` with `InvalidInput`, and `AssumeRole` refuses
-  `Policy` and `PolicyArns` with `InvalidParameterValue`, since dropping them
-  would report a user or session that is not what was asked for. `AssumeRole`'s `ExternalId`, `SerialNumber`, `TokenCode`,
-  `SourceIdentity`, `Tags`, `TransitiveTagKeys` and `ProvidedContexts` are
-  accepted and ignored: they have no effect here, the role trusting the root
-  user without conditions. Responses carry no `PackedPolicySize` or
-  `SourceIdentity`.
+- **A session of a deleted role is orphaned.** A session is bound to its
+  role's ID, so a role created again with the same name is another role.
+  Until it expires the orphaned session still authenticates and may call
+  `GetCallerIdentity`; every other action is `AccessDenied`, no trust policy
+  allows it, and the signing-key endpoint reports it with no policies. AWS
+  documents no answer for such a session.
+- **Trust policies name unique IDs.** As on AWS, a user or role ARN in a
+  trust policy's `Principal` is bound to that principal's unique ID when the
+  policy is saved, and an ARN no user or role has is
+  `MalformedPolicyDocument`, "Invalid principal in policy". A user or role
+  deleted and created again under the same ARN is another principal, which
+  the trust policy does not name until it is saved again; `GetRole` and
+  `ListRoles` then show the old unique ID in place of the ARN.
+- **A list member's index has one spelling.** An index such as
+  `Tags.member.01` or `Tags.member.+1` is `ValidationError`, since read as a
+  number it would name a member another parameter names too.
+- **Some parameters are refused or not acted on.** `CreateUser` and
+  `CreateRole` refuse `PermissionsBoundary` with `InvalidInput`, and
+  `AssumeRole` refuses `Policy`, `PolicyArns`, `Tags`, `TransitiveTagKeys`
+  and `SourceIdentity` with `InvalidParameterValue`, since a session does not
+  carry session policies, session tags or a source identity. `AssumeRole`'s
+  `ExternalId` is supplied to the trust policy as `sts:ExternalId`;
+  `SerialNumber`, `TokenCode` and `ProvidedContexts` are accepted and not
+  supplied as condition keys. Responses carry no `PackedPolicySize` or
+  `SourceIdentity`, and roles no `RoleLastUsed`.
 - **The root user's key cannot be managed.** It is configured, so creating,
   deactivating or deleting it through IAM fails with `InvalidInput`, where
   AWS lets the root user manage its own access keys. The root user's
   `CreateDate`, and its key's, is when the database was created.
-- **Tags are on users only,** with no tag-based access control, since there
-  are no policies.
+- **Tags are set on create for roles and policies,** and with `TagUser` on
+  users. Tag conditions are evaluated with the keys the Service
+  Authorization Reference lists: `aws:ResourceTag/<key>` from the tags of the
+  user, role or managed policy acted on (and `iam:ResourceTag/<key>` for a
+  user or role), `aws:RequestTag/<key>` and `aws:TagKeys` from the tags of
+  `CreateUser`, `TagUser`, `CreatePolicy` and `CreateRole` (`aws:TagKeys`
+  from `UntagUser`'s keys), and `aws:PrincipalTag/<key>` from the caller's
+  tags, a user's own or a session's role's.
 - **Secrets are stored as they are.** SigV4 needs the secret itself to derive
   a signing key, so the database holds every secret in the clear; session
   tokens are kept as their SHA-256. Treat the database file as a credential.
@@ -342,7 +535,10 @@ identity, so a key deactivated or deleted is refused on the next request.
   without regard to case. A `Marker` is opaque and only accepted back by the same
   listing with the same parameters; any other fails with `InvalidInput`.
   `ListUserTags` pages by position, so a tag set or removed between two pages
-  can shift the second by one.
+  can shift the second by one. `ListRoles` and `ListPolicies` are in order of
+  names without regard to case, `ListPolicyVersions` newest first, the
+  attached-policy listings in the order of attachment, and the inline-policy
+  listings in order of names. Inline policy names are case sensitive.
   `GetAccessKeyInfo` with a key this service never issued fails with
   `InvalidParameterValue`, where AWS decodes an account from any key ID.
   `UpdateAccessKey` to `Expired` fails with `InvalidInput`. A body that does
@@ -367,9 +563,32 @@ identity, so a key deactivated or deleted is refused on the next request.
   trusted, since nothing is expected in front of this service and the header
   is unsigned.
 
+## Upgrading
+
+From v0.3.1, the signing-key endpoint answers older clients as before. The
+v0.4.0 `keysource` client asks for version 3, which v0.3.1 does not serve,
+so a service that takes it needs identity v0.4.0; it fills the
+`sigv4.Principal` fields [tule.dev/sigv4](/sigv4/) v0.4.0 added. Tag keys now
+fold beyond ASCII: a user or role tagged `Ä` and then `ä` has one tag.
+Tags stored twice that way before keep both until one is removed or set
+again.
+
+From v0.1.0, v0.2.0 is a breaking release:
+
+- **Policies are enforced.** v0.1.0 let the root user and
+  `OrganizationAccountAccessRole` sessions call every IAM operation and IAM
+  users none. Now every principal but the root user needs a policy that
+  allows each action. `OrganizationAccountAccessRole` keeps its access by
+  having `AdministratorAccess` attached; `AssumeRole` needs a trust policy
+  that allows the caller.
+- **Role sessions from v0.1.0 are dropped** by the database migration;
+  `AssumeRole` issues new ones.
+- **`DeleteUser` refuses a user with policies**, attached or inline, with
+  `DeleteConflict`.
+
 ## Release and module
 
 This page follows the identity README at
-[v0.1.0](https://github.com/tulehq/identity/blob/v0.1.0/README.md), released as
-`ghcr.io/tulehq/identity:0.1.0`. Its Go module is `tule.dev/identity`, with the
+[v0.4.0](https://github.com/tulehq/identity/blob/v0.4.0/README.md), released as
+`ghcr.io/tulehq/identity:0.4.0`. Its Go module is `tule.dev/identity`, with the
 source at [github.com/tulehq/identity](https://github.com/tulehq/identity).

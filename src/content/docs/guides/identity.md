@@ -1,6 +1,6 @@
 ---
 title: Identity and keys
-description: Static keys, identity-issued keys, AssumeRole into member accounts, and what every key shares.
+description: Static keys, identity-issued keys, policies, AssumeRole into member accounts, and what every key shares.
 ---
 
 ## Standalone: one static key
@@ -25,7 +25,8 @@ The service's configured key must then be identity's root key:
 on both. The service signs its calls to identity's signing-key endpoint with
 it.
 
-- The root key is checked locally first and never asks identity.
+- The root key is checked locally first, never asks identity, and is never
+  evaluated against policies.
 - Any other key is looked up in identity on every request, with nothing
   cached, so a key identity deactivates or deletes is refused on the next
   request.
@@ -43,16 +44,11 @@ identity has three kinds of principal:
 |---|---|---|
 | The root user | The configured root key | The management account, `TULE_Identity_AccountID` (`000000000000` by default) |
 | IAM users | Up to two access keys each, from `CreateAccessKey` | Its own account |
-| Role sessions | A key, secret, session token and expiration, from `AssumeRole` | The role's member account |
+| Role sessions | A key, secret, session token and expiration, from `AssumeRole` | The role's account |
 
-With no policies, the rules are fixed:
-
-- IAM operations may be called by the root user and by
-  `OrganizationAccountAccessRole` sessions, each in its own account. An IAM
-  user gets `AccessDenied`.
-- Every active principal may call `GetCallerIdentity` and `GetAccessKeyInfo`,
-  and every active key works against the other Tule services.
-- `AssumeRole` may be called by the root user only.
+The root user may do everything. Every other principal may do what its
+identity policies allow, on identity and on every service pointed at it; see
+[Policies](#policies).
 
 ## Create a user and a key
 
@@ -63,8 +59,9 @@ aws iam create-user --user-name dev
 aws iam create-access-key --user-name dev
 ```
 
-The `CreateAccessKey` response is the only one that carries the secret. Or
-with curl:
+The `CreateAccessKey` response is the only one that carries the secret. The
+new key is denied everything but `GetCallerIdentity` until the user has a
+policy; see [Policies](#policies). Or with curl:
 
 ```sh
 curl -fsS --aws-sigv4 aws:amz:us-east-1:iam \
@@ -73,18 +70,42 @@ curl -fsS --aws-sigv4 aws:amz:us-east-1:iam \
   http://localhost:9030/
 ```
 
-## AssumeRole into a member account
+## Roles and AssumeRole
 
-identity can assume one role,
-`arn:aws:iam::<account>:role/OrganizationAccountAccessRole`, where `<account>`
-is an `ACTIVE` member of the organization in [accounts](/accounts/) other than
-the management account. Only the root user may call it.
+`CreateRole` makes a role with a trust policy, which says who may assume it.
+A role can be assumed when its trust policy allows the caller, and, unless
+the caller is the root user, the caller's own policies allow `sts:AssumeRole`
+on the role; within one account, a trust policy that names the caller
+directly is enough. The session carries the role's policies:
+
+```sh
+aws iam create-role --role-name deployer --assume-role-policy-document   '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::000000000000:user/dev"},"Action":"sts:AssumeRole"}]}'
+aws iam attach-role-policy --role-name deployer   --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
+```
+
+The session lasts `DurationSeconds`, 3600 by default and at most the role's
+`MaxSessionDuration`. Its key, secret and token sign requests to every
+service pointed at identity; set `AWS_SESSION_TOKEN` with them. A session's
+`UserId` is `<role ID>:<session>` and its ARN
+`arn:aws:sts::<account>:assumed-role/<role name>/<session>`. A session of a
+role that is deleted still authenticates until it expires, but is denied
+everything but `GetCallerIdentity`, even if a role of the same name is
+created again.
+
+### Into a member account
+
+From the management account, the caller may also assume a role in an
+`ACTIVE` member account of the organization in [accounts](/accounts/). The
+first time `arn:aws:iam::<account>:role/OrganizationAccountAccessRole` is
+assumed from the management account, identity creates that role, as
+Organizations would have: a trust policy for the management account's root
+and `AdministratorAccess` attached. After that it is an ordinary role.
 
 It needs `TULE_Identity_AccountsEndpoint` set on identity (the full stack sets
 it to `http://accounts:9020`). identity asks accounts which account manages
 the organization, which must be `TULE_Identity_AccountID`, and whether the
-account is an active member. Without the endpoint, every role is refused with
-`AccessDenied`.
+account is an active member. Without the endpoint, only roles of the
+caller's own account can be assumed.
 
 ```sh
 aws organizations create-organization --feature-set ALL
@@ -97,32 +118,71 @@ aws sts assume-role \
   --role-session-name dev
 ```
 
-The session lasts `DurationSeconds`, 3600 by default and at most 3600. Its
-key, secret and token sign requests to every service pointed at identity; set
-`AWS_SESSION_TOKEN` with them. A session's `UserId` is `<role ID>:<session>`
-and its ARN
-`arn:aws:sts::<account>:assumed-role/OrganizationAccountAccessRole/<session>`.
-Role chaining is not possible.
-
-## What is shared
-
-There is no per-account data isolation. Every accepted key, the root key, an
-IAM user's or a role session's in any account, sees and changes the same data:
-
-- object-store: every bucket and object;
-- secret-store: every secret, with ARNs that keep `TULE_Store_AccountID`
-  whoever signed;
-- accounts: the one organization, with every Organizations operation;
-- mailbox: every stored message;
-- queues: every queue, in the configured account;
-- functions: every function. Each function's containers get the root key by
-  default.
-
-identity itself keeps users per account: users a role session creates belong
-to its member account.
+A member account's session is a principal of that account. In identity it
+manages that account's users, roles and policies; the other services refuse
+it (see [What is shared](#what-is-shared)).
 
 ## Policies
 
-IAM policies are in progress. In the released services no policy is
-evaluated: beyond identity's fixed rules above, every accepted key may call
-every operation.
+identity stores managed and inline identity policies and role trust
+policies, and every service pointed at identity evaluates the policies of
+the keys it issued, as AWS evaluates identity-based policies within one
+account:
+
+- The root key is never evaluated, and may do everything.
+- Every other key is evaluated on every request against its principal's
+  policies: a user's inline policies and the default versions of its
+  attached managed policies, or a session's role's, as they are at that
+  request. An explicit `Deny` wins; otherwise the request needs an `Allow`.
+- **A key with no policy is denied** every request, `AccessDenied` in the
+  service's own protocol, except identity's `GetCallerIdentity`.
+- Each action is the one the Service Authorization Reference lists for the
+  operation, such as `s3:GetObject` on `arn:aws:s3:::<bucket>/<key>`; each
+  service's page lists its actions, resources and condition keys.
+
+To give a user permissions, attach a managed policy or put an inline one.
+`AdministratorAccess`, the one AWS managed policy shipped, allows everything:
+
+```sh
+aws iam attach-user-policy --user-name dev   --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
+```
+
+Or something narrower, such as read access to one bucket:
+
+```sh
+aws iam put-user-policy --user-name dev --policy-name read-uploads   --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject","s3:ListBucket"],"Resource":["arn:aws:s3:::uploads","arn:aws:s3:::uploads/*"]}]}'
+```
+
+A change applies on the next request, since nothing is cached. A role gets
+policies the same way, with `attach-role-policy` and `put-role-policy`.
+
+The Tule-specific retrieval routes of mailbox and queues are behind
+`tule:Inspect`, an action of Tule's own, which a policy names beside the
+service's actions, as in `"Action": ["sqs:*", "tule:Inspect"]`.
+
+Not evaluated anywhere: resource-based policies (bucket, queue, secret and
+SES sending policies), permissions boundaries, session policies and service
+control policies. A role session's `aws:PrincipalArn` lacks the role's path
+in object-store, secret-store, accounts, mailbox and queues, so a condition
+on a role ARN with a path does not match a session there.
+
+## What is shared
+
+There is no per-account data isolation, so the services refuse principals
+of any account but their own, `000000000000` by default, identity's default
+management account:
+on AWS such a request would also need a resource-based policy, and none is
+evaluated here. Within that account, every accepted key sees the same data,
+as far as its policies allow:
+
+- object-store: every bucket and object, in `TULE_Auth_AccountID`;
+- secret-store: every secret, in `TULE_Store_AccountID`;
+- accounts: the one organization. A member account's principal may call
+  `DescribeOrganization` only;
+- mailbox: every stored message, in `TULE_Mailbox_AccountID`;
+- queues: every queue, in `TULE_Queues_AccountID`;
+- functions: every function. Each function's containers get the root key by
+  default.
+
+identity itself keeps users, roles and policies per account: what a member
+account's session creates belongs to that account.
