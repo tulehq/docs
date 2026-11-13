@@ -31,6 +31,9 @@ DOCKER_GID=$(stat -f %g /var/run/docker.sock) docker compose --profile functions
 ```
 
 Without it, the console's Functions section shows the service as unreachable.
+Pointed at identity, functions runs each function with its execution role,
+which must be a role identity has that trusts `lambda.amazonaws.com`; see
+[functions](/functions/#execution-roles).
 The functions README marks its Docker Desktop (macOS, Windows) setup as
 unverified; see [functions](/functions/#running-it).
 
@@ -49,7 +52,7 @@ only what its policies allow, and nothing until it has one (see
 | secret-store | `ghcr.io/tulehq/secret-store:0.3.0` | 9010 |
 | mailbox | `ghcr.io/tulehq/mailbox:0.2.0` | 9040 |
 | queues | `ghcr.io/tulehq/queues:0.2.0` | 9050 |
-| functions (profile `functions`) | `ghcr.io/tulehq/functions:0.1.1` | 9060, and 9061 for the Runtime API |
+| functions (profile `functions`) | `ghcr.io/tulehq/functions:0.2.0` | 9060, and 9061 for the Runtime API |
 | console | `ghcr.io/tulehq/console:0.1.0` | 9070 |
 
 Each service keeps its data on a named volume. The console holds no data.
@@ -124,7 +127,7 @@ services:
     volumes: [queuesdata:/data]
 
   functions:
-    image: ghcr.io/tulehq/functions:0.1.1
+    image: ghcr.io/tulehq/functions:0.2.0
     profiles: [functions]
     depends_on:
       queues: {condition: service_healthy}
