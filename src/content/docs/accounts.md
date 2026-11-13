@@ -1,6 +1,6 @@
 ---
 title: accounts
-description: "accounts 0.3.0: a local stand-in for Organizations."
+description: "accounts 0.4.0: a local stand-in for Organizations."
 ---
 
 An AWS Organizations-compatible account service that keeps an organization in
@@ -21,7 +21,7 @@ With Docker:
 ```sh
 docker run --rm -p 9020:9020 -v accountsdata:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
-  ghcr.io/tulehq/accounts:0.3.0
+  ghcr.io/tulehq/accounts:0.4.0
 ```
 
 The image is based on Alpine, so `docker exec -it <container> sh` gives you a
@@ -77,7 +77,10 @@ a key identity deactivates or deletes is refused on the next one. A request
 signed with the configured key never asks identity. When identity cannot be
 asked, fails, or gives no answer within 10 seconds, a request signed with
 another key fails with `500` `ServiceException`, never as an unknown key,
-and the configured key keeps working.
+and the configured key keeps working. The endpoint must be identity v0.4.0
+or later, which reports the principal's role path, unique ID and tags; an
+older identity fails every request signed with a key it issued as
+`ServiceException`.
 
 ## Permissions
 
@@ -105,6 +108,18 @@ for the key (inline and attached managed, a session's being its role's):
    \<action\> action", or "... with an explicit deny in an identity-based
    policy".
 
+Evaluation is tule.dev/policy's `Authorize`, with no resource-based policy:
+Organizations' resource policy is a delegation policy for delegated
+administrators, which this service does not have, so resource policies are
+not served and none is evaluated. A principal whose identity fields
+disagree, or a role session whose role has been deleted, is refused
+`... because no identity-based policy allows the <action> action`.
+
+**Behavior change in v0.4.0:** a role session's `aws:PrincipalArn` now
+carries the role's path, so a condition written against the path-less ARN,
+such as `ArnEquals` `arn:aws:iam::<account>:role/auditor` for a role at
+`/audit/`, no longer matches, and one written with the path now does.
+
 **Breaking change:** a key identity issued with no policy allowing an
 action is now refused it. Keys that worked with no policies need one, such
 as `{"Effect":"Allow","Action":"organizations:*","Resource":"*"}`. A role
@@ -131,20 +146,22 @@ exist yet, which may differ from AWS.
 
 The condition keys supplied are the global `aws:SourceIp`,
 `aws:CurrentTime`, `aws:EpochTime`, `aws:SecureTransport`,
-`aws:PrincipalAccount`, `aws:PrincipalArn`, `aws:PrincipalType`,
-`aws:RequestedRegion` (always `us-east-1`) and, for an IAM user,
-`aws:username`; `aws:ResourceTag/<key>` from each evaluated resource's tags;
+`aws:RequestedRegion` (always `us-east-1`), and from what identity returns
+for the key `aws:PrincipalAccount`, `aws:PrincipalArn` (a role session's is
+its role's ARN with the path, such as
+`arn:aws:iam::<account>:role/audit/auditor`), `aws:userid`,
+`aws:PrincipalType`, `aws:PrincipalTag/<key>` (an IAM user's or a session's
+role's tags) and, for an IAM user, `aws:username`; `aws:ResourceTag/<key>` from each evaluated resource's tags;
 and `aws:RequestTag/<key>` and `aws:TagKeys` from the tags of
 `CreateAccount`, `CreateOrganizationalUnit`, `TagResource` and
 `UntagResource`.
 
-The known gaps, as the README lists them: a role session's
-`aws:PrincipalArn` lacks the role's path, so a condition on a role ARN with
-a path does not match it; `aws:PrincipalTag/<key>` and `aws:userid` are not
-supplied; tags in one request whose keys differ only by case are refused
-for an evaluated principal; and service control policies, permissions
-boundaries, session policies and resource-based policies are not
-evaluated.
+The known gaps, as the README lists them: tags in one request whose keys
+differ only by case are refused for an evaluated principal;
+`aws:PrincipalOrgID` and `aws:PrincipalOrgPaths` are not supplied, so a
+Deny with a negated operator on them denies every evaluated principal; and
+service control policies, permissions boundaries and session policies are
+not evaluated, and resource-based policies are not served.
 
 The management account is configured, not created. `CreateOrganization` makes
 it the management account and the first member of the new organization, in
@@ -335,6 +352,6 @@ paginators work.
 ## Release and module
 
 This page follows the accounts README at
-[v0.3.0](https://github.com/tulehq/accounts/blob/v0.3.0/README.md), released as
-`ghcr.io/tulehq/accounts:0.3.0`. Its Go module is `tule.dev/accounts`, with the
+[v0.4.0](https://github.com/tulehq/accounts/blob/v0.4.0/README.md), released as
+`ghcr.io/tulehq/accounts:0.4.0`. Its Go module is `tule.dev/accounts`, with the
 source at [github.com/tulehq/accounts](https://github.com/tulehq/accounts).

@@ -1,6 +1,6 @@
 ---
 title: mailbox
-description: "mailbox 0.2.0: a local stand-in for SES v2."
+description: "mailbox 0.3.0: a local stand-in for SES v2."
 ---
 
 An Amazon SES v2-compatible mail service that never delivers mail. Every
@@ -23,7 +23,7 @@ With Docker:
 ```sh
 docker run --rm -p 9040:9040 -v mailboxdata:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
-  ghcr.io/tulehq/mailbox:0.2.0
+  ghcr.io/tulehq/mailbox:0.3.0
 ```
 
 The image is based on Alpine, so `docker exec -it <container> sh` gives you a
@@ -61,8 +61,8 @@ Settings come from environment variables prefixed with `TULE_`, and from a
 | `TULE_Server_ShutdownTimeout` | `7s` | How long a graceful shutdown waits for in-flight requests |
 | `TULE_Auth_AccessKeyID` | required | The access key clients sign requests with |
 | `TULE_Auth_SecretAccessKey` | required | Its secret |
-| `TULE_Auth_IdentityEndpoint` | unset | The identity service's base URL, such as `http://localhost:9030`: an absolute http or https URL. Set, the keys identity issued are accepted as well as the configured key, held to their identity policies ([Permissions](#permissions)), and identity is asked about them with the configured key, which must be identity's root key. Identity 0.2.0 or later is required. Unset, mailbox runs standalone on the configured key alone |
-| `TULE_Mailbox_AccountID` | `000000000000` | The account mailbox's resources belong to: 12 digits. The root key acts in it, the ARNs carry it, and a principal of any other account is refused. The default is identity's default management account |
+| `TULE_Auth_IdentityEndpoint` | unset | The identity service's base URL, such as `http://localhost:9030`: an absolute http or https URL. Set, the keys identity issued are accepted as well as the configured key, held to their identity policies ([Permissions](#permissions)), and identity is asked about them with the configured key, which must be identity's root key. Identity 0.4.0 or later is required. Unset, mailbox runs standalone on the configured key alone |
+| `TULE_Mailbox_AccountID` | `000000000000` | The account mailbox's resources belong to: 12 digits. The root key acts in it and the ARNs carry it. The default is identity's default management account |
 | `TULE_Mailbox_Region` | `us-east-1` | The region the ARNs carry and `aws:RequestedRegion` is, whatever region a request was signed for |
 | `TULE_GasEnv` | | `development` logs console output at trace level, `production` logs at warn level, `testing` disables logging |
 
@@ -87,28 +87,43 @@ and the configured key keeps working.
 Without an identity endpoint nothing is evaluated: the configured key is the
 account's root, and may call everything.
 
-With one, mailbox authorizes requests as AWS does within an account, with
-[tule.dev/policy](/policy/):
+With one, mailbox authorizes requests as AWS does, within an account and
+across accounts, with [tule.dev/policy](/policy/)'s `Authorize`:
 
-- **The root principal**, the configured key, which is also identity's root
-  user's key, is always allowed and never evaluated.
-- **Every other principal**, an IAM user's key or a role session's, is
-  evaluated on every request, to the SES API and the retrieval API alike,
-  against the identity policies identity reports for it: a user's inline and
-  attached managed policies, or a session's role's. An explicit `Deny` wins;
-  otherwise the request needs an `Allow`. A request that is not allowed
-  fails with `403` `AccessDeniedException` and AWS's message, "User: \<arn\>
-  is not authorized to perform: \<action\> on resource: \<arn\> because no
-  identity-based policy allows the \<action\> action". Nothing is stored for
-  a denied request.
-- **A principal of another account** than `TULE_Mailbox_AccountID` is
-  refused every operation, `tule:Inspect` included, whatever its policies
-  allow: on AWS a cross-account request also needs a resource-based policy,
-  none is enforced here, and one store serves every account.
+- **The root principal of mailbox's account** (`TULE_Mailbox_AccountID`),
+  the configured key, which is also identity's root user's key, is always
+  allowed and never evaluated.
+- **Every other principal**, an IAM user's key, a role session's, or the
+  root user of another account, is evaluated on every request, to the SES
+  API and the retrieval API alike, against the identity policies identity
+  reports for it (a user's inline and attached managed policies, or a
+  session's role's) and the resource-based policies of what it acts on.
+  Only an identity's sending authorization policies are resource-based
+  policies here, and only sends are evaluated with them
+  ([Sending authorization](#sending-authorization)).
+- **How they combine:** an explicit `Deny` in either kind denies. Within
+  mailbox's account an `Allow` in either kind allows, but a resource-based
+  `Allow` that names the caller only through its account also needs an
+  identity `Allow`; one that names the IAM user, the role (by its ARN with
+  the path) or the session, or `"*"`, is enough alone. A principal of
+  another account needs both an identity `Allow` and a resource-based
+  `Allow`; another account's root user needs only the resource-based one.
+  So another account can send from an identity that grants it, and is
+  denied every other operation, `tule:Inspect` included.
+- **A denied request** fails with `403` `AccessDeniedException` and AWS's
+  message, "User: \<arn\> is not authorized to perform: \<action\> on
+  resource: \<arn\>" and the reason: "with an explicit deny in an
+  identity-based policy", "with an explicit deny in a resource-based
+  policy", "because no identity-based policy allows the \<action\> action"
+  or "because no resource-based policy allows the \<action\> action".
+  Nothing is stored for a denied request.
+- **Fail closed.** A principal whose attributes disagree, or a role session
+  whose role was deleted, is denied. A principal whose `Root` flag and
+  `Account` type disagree is refused with `500` `InternalFailure`, and so is
+  a request on a stored policy that no longer parses.
 
-**This is a breaking change from 0.1.** A key identity issued used to be able
-to call everything; one with no policy is now denied everything, and one of
-a member account is denied everything whatever its policies. Give it a
+**This was a breaking change in 0.2.** A key identity issued used to be able
+to call everything; one with no policy is now denied everything. Give it a
 policy, such as `{"Effect": "Allow", "Action": ["ses:*", "tule:Inspect"],
 "Resource": "*"}` for the access it had.
 
@@ -122,10 +137,11 @@ request's.
 
 | Operation | Action | Evaluated on |
 |---|---|---|
-| `SendEmail` | `ses:SendEmail` | The sender's identity, and for `Raw` content with a `From` header and `FromEmailAddress` the header's identity too; the configuration set, when the request (or a raw message's `X-SES-CONFIGURATION-SET` header) names one; the stored template, for `Template` content that names one |
-| `SendBulkEmail` | `ses:SendBulkEmail` | The same three, from the request; a denial refuses the whole request |
+| `SendEmail` | `ses:SendEmail` | The sender's identity, and for `Raw` content with a `From` header and `FromEmailAddress` the header's identity too; the `FeedbackForwardingEmailAddress`'s identity, when it has one; the configuration set, when the request (or a raw message's `X-SES-CONFIGURATION-SET` header) names one; the stored template, for `Template` content that names one |
+| `SendBulkEmail` | `ses:SendBulkEmail` | The same, from the request; a denial refuses the whole request |
 | `CreateEmailIdentity` | `ses:CreateEmailIdentity`, and `ses:TagResource` when it has `Tags` | The new identity |
 | `GetEmailIdentity`, `DeleteEmailIdentity` | `ses:GetEmailIdentity`, `ses:DeleteEmailIdentity` | The identity |
+| `CreateEmailIdentityPolicy`, `GetEmailIdentityPolicies`, `UpdateEmailIdentityPolicy`, `DeleteEmailIdentityPolicy` | `ses:<Operation>` | The identity |
 | `ListEmailIdentities` | `ses:ListEmailIdentities` | `*` |
 | `CreateEmailTemplate` | `ses:CreateEmailTemplate`, and `ses:TagResource` when it has `Tags` | The new template |
 | `GetEmailTemplate`, `UpdateEmailTemplate`, `DeleteEmailTemplate`, `TestRenderEmailTemplate` | `ses:<Operation>` | The template |
@@ -152,19 +168,77 @@ region, so it takes a grant such as `"Resource": "*"` or
 
 Every request supplies the global `aws:SourceIp`, `aws:CurrentTime`,
 `aws:EpochTime`, `aws:SecureTransport`, `aws:RequestedRegion`
-(`TULE_Mailbox_Region`), `aws:PrincipalAccount`, `aws:PrincipalArn`,
-`aws:PrincipalType` and, for an IAM user, `aws:username`. SES operations also
+(`TULE_Mailbox_Region`) and `aws:PrincipalTag/<key>` for each of the IAM
+user's or the role's tags; and, from the attributes identity reports,
+`aws:PrincipalArn` (for a role session its role's ARN with the role's
+path, so `arn:aws:iam::*:role/restricted/*` matches a session of
+`role/restricted/admin`), `aws:PrincipalAccount`, `aws:userid`,
+`aws:PrincipalType` (`User`, `AssumedRole` or `Account`) and, for an IAM
+user, `aws:username`. SES operations also
 supply `ses:ApiVersion` (`2`); `SendEmail` supplies `ses:FromAddress`,
 `ses:FromDisplayName`, `ses:Recipients` and `ses:FeedbackAddress`; creates
 supply `aws:RequestTag/<key>` and `aws:TagKeys`; and an existing identity or
 template supplies `aws:ResourceTag/<key>`.
 
-The gaps, as the README lists them: a role session's `aws:PrincipalArn` has
-no path, so a condition on a role ARN with a path does not match it; there
-is no `aws:PrincipalTag/<key>` and no `aws:userid`; SES's sending
-authorization policies are not served, so no resource-based policy is
-evaluated; and permissions boundaries, session policies and SCPs are not
-evaluated.
+### Sending authorization
+
+An identity's sending authorization policies are resource-based policies
+that let other principals send from it. They are served by
+`CreateEmailIdentityPolicy`, `GetEmailIdentityPolicies`,
+`UpdateEmailIdentityPolicy` and `DeleteEmailIdentityPolicy`;
+`GetEmailIdentity` reports them, and `DeleteEmailIdentity` deletes them with
+the identity. An identity holds at most 20. Each is checked before it is
+stored, `BadRequestException` otherwise: a name of 1 to 64 letters, digits,
+dashes and underscores, a document of at most 4 KB that parses with
+tule.dev/policy's `ParseResource`, and every statement's `Resource` the
+identity's ARN (or that ARN with `*` for its region); `NotResource` is
+refused. Any action is accepted in a document, though only a send is
+evaluated with it.
+
+**A send** is evaluated on the identity it sends from, with every policy
+that identity has. A `Deny` in any policy denies, and an `Allow` in any
+counts. A delegate sender in another account is allowed when its identity
+policy and one of the identity's policies both allow it. A send that uses a
+stored template is also evaluated on the template, which has no
+resource-based policy, so another account cannot send with mailbox's
+templates; inline content works. Its configuration set is evaluated in the
+caller's account. The feedback forwarding address, when a send gives one,
+is evaluated the same way on its own identity, so a delegate needs a grant
+there too.
+
+**The identity ARNs a send gives** (`FromEmailAddressIdentityArn`,
+`FeedbackForwardingEmailAddressIdentityArn`, and a raw message's
+`X-SES-SOURCE-ARN` and `X-SES-FROM-ARN` headers) choose the identity whose
+policies apply. Each may name the address's own identity or one of a domain
+that covers it, so `identity/example.com` serves `sender@example.com` even
+when that address has an identity of its own. The more specific identities
+an ARN passes over still count for a `Deny`, though not for an `Allow`, a
+choice of mailbox's own. An ARN is checked for every caller, the root
+included: it must be an SES identity ARN of mailbox's account and region,
+naming an existing identity that covers the address. `X-SES-RETURN-PATH-ARN`
+is removed and not read.
+
+The condition keys of a send apply in these policies as in identity
+policies: `ses:FromAddress`, `ses:FromDisplayName`, `ses:Recipients`,
+`ses:FeedbackAddress`, `ses:ApiVersion` and the global keys.
+
+### Gaps
+
+The gaps, as the README lists them:
+
+- Principals match by ARN, where AWS converts a stored ARN to the
+  principal's unique ID, so a user or role deleted and created again under
+  the same name inherits its grants. A session whose role was deleted is
+  denied.
+- `aws:PrincipalOrgID` and `aws:PrincipalOrgPaths` are not supplied, so a
+  `Deny` with a negated operator on them denies every evaluated principal.
+- Service, federated-user and `CanonicalUser` principals never match a
+  caller.
+- A delegate sender needs no identity ARN: every identity is mailbox's
+  account's, and a send without one is evaluated on the most granular
+  identity of its address.
+- Permissions boundaries, session policies, SCPs and RCPs are not
+  evaluated.
 
 ## Health checks
 
@@ -224,9 +298,10 @@ curl -fsS --aws-sigv4 aws:amz:us-east-1:ses --user test:test \
 | `SendEmail` | Simple, Raw and Template content (a stored template by `TemplateName` or `TemplateArn`, or inline `TemplateContent`). The message is stored, never sent |
 | `SendBulkEmail` | Template content; one stored message per entry, and one result per entry |
 | `CreateEmailIdentity` | Email addresses and domains; verified at once. A domain gets Easy DKIM tokens, or its own selector with `DkimSigningAttributes` |
-| `GetEmailIdentity` | |
+| `GetEmailIdentity` | With its policies |
 | `ListEmailIdentities` | Paginated; `Filter` by `IDENTITY_NAME_CONTAINS`, `IDENTITY_TYPE` and `VERIFICATION_STATUS` |
-| `DeleteEmailIdentity` | |
+| `DeleteEmailIdentity` | Deletes its policies too |
+| `CreateEmailIdentityPolicy` / `GetEmailIdentityPolicies` / `UpdateEmailIdentityPolicy` / `DeleteEmailIdentityPolicy` | Sending authorization policies, at most 20 of 4 KB per identity; see [Sending authorization](#sending-authorization) |
 | `CreateEmailTemplate` / `GetEmailTemplate` / `UpdateEmailTemplate` / `DeleteEmailTemplate` | The template must be valid Handlebars |
 | `ListEmailTemplates` | Paginated |
 | `TestRenderEmailTemplate` | Answers the rendered MIME message |
@@ -530,10 +605,10 @@ curl.
   destinations, and an identity's default configuration set, which is
   recorded, is not applied to messages sent without one.
 - **Some request members are accepted and ignored:** `EndpointId`,
-  `TenantName`, `ListManagementOptions`, `ConfigurationOverrides`, and the
-  sending-authorization ARNs (`FromEmailAddressIdentityArn` and the rest).
+  `TenantName`, `ListManagementOptions` and `ConfigurationOverrides`.
   `FeedbackForwardingEmailAddress` is checked and recorded but receives
-  nothing.
+  nothing. The sending authorization ARNs are checked
+  ([Sending authorization](#sending-authorization)).
 - **The quotas are reported, not enforced.** `GetAccount` reports production
   access, sending enabled, a quota of 1,000,000 messages a day at 1,000 a
   second, and `SentLast24Hours` counting the recipients of the messages stored
@@ -592,14 +667,37 @@ curl.
   with its token; a token that is not the session's fails with
   `UnrecognizedClientException`, and an expired one with
   `ExpiredTokenException`.
-- **Only identity-based policies are enforced**, and only with identity; see
-  [Permissions](#permissions) for the keys supplied and the gaps.
+- **Identity policies and sending authorization policies are enforced**, and
+  only with identity; see [Permissions](#permissions) for the keys supplied
+  and the gaps.
 - **One process per database.** The store is one SQLite file reached through
   one connection, which serializes the server's own transactions; nothing
   coordinates two servers pointed at the same file.
 - **Logs record the connection's peer address.** `X-Forwarded-For` is not
   trusted, since nothing is expected in front of this service and the header
   is unsigned.
+
+## Upgrading from 0.2
+
+- **Cross-account requests are evaluated.** 0.2 refused every principal of
+  another account. Now one is allowed when its identity policies and a
+  sending authorization policy both allow a send; everything else is still
+  denied to it.
+- **Sending authorization policies are enforced, within the account too.** A
+  policy that names a user or a role session lets it send from the identity
+  without an identity policy, and a `Deny` in one refuses a send its
+  identity policies allow.
+- **`aws:PrincipalArn` of a role session has the role's path,** so a
+  condition written for 0.2's path-less value no longer matches a session of
+  a role with a path. `aws:userid` and `aws:PrincipalTag/<key>` are now
+  supplied.
+- **identity v0.4.0 or later** is required; the keys of an older identity
+  are refused.
+- **The sending authorization ARNs are honored** rather than ignored, and a
+  send with `FeedbackForwardingEmailAddress` now also needs `ses:SendEmail`
+  allowed on that address's identity.
+- A migration adds the policy table on the first start; it can be rolled
+  back.
 
 ## Upgrading from 0.1
 
@@ -621,6 +719,6 @@ curl.
 ## Release and module
 
 This page follows the mailbox README at
-[v0.2.0](https://github.com/tulehq/mailbox/blob/v0.2.0/README.md), released as
-`ghcr.io/tulehq/mailbox:0.2.0`. Its Go module is `tule.dev/mailbox`, with the
+[v0.3.0](https://github.com/tulehq/mailbox/blob/v0.3.0/README.md), released as
+`ghcr.io/tulehq/mailbox:0.3.0`. Its Go module is `tule.dev/mailbox`, with the
 source at [github.com/tulehq/mailbox](https://github.com/tulehq/mailbox).

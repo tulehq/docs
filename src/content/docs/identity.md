@@ -1,6 +1,6 @@
 ---
 title: identity
-description: "identity 0.4.0: a local stand-in for IAM and STS."
+description: "identity 0.4.1: a local stand-in for IAM and STS."
 ---
 
 An AWS IAM- and STS-compatible identity service that keeps users, roles,
@@ -30,7 +30,7 @@ With Docker:
 docker run --rm -p 9030:9030 -v identitydata:/data \
   -e TULE_Auth_AccessKeyID=AKIAIOSFODNN7EXAMPLE \
   -e TULE_Auth_SecretAccessKey=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
-  ghcr.io/tulehq/identity:0.4.0
+  ghcr.io/tulehq/identity:0.4.1
 ```
 
 The image is based on Alpine, so `docker exec -it <container> sh` gives you a
@@ -565,6 +565,17 @@ transport error otherwise.
 
 ## Upgrading
 
+From v0.4.0, trust policies are parsed with tule.dev/policy v0.2.0, which
+refuses an `AWS` principal ARN with a region or with an account that is not
+12 digits. `CreateRole` and `UpdateAssumeRolePolicy` with such a principal,
+such as `arn:aws:iam:us-east-1:123456789012:root`, now fail with
+`MalformedPolicyDocument`, "Invalid principal in policy". A role whose
+stored trust policy no longer parses trusts no one: `AssumeRole` answers
+`AccessDenied` and the assume-role endpoint `NotTrusted`, each refusal
+logged as a warning, and identity logs one warning per such role at
+startup. The policies are left as stored; rewrite each with
+`UpdateAssumeRolePolicy` to make the role assumable again.
+
 From v0.3.1, the signing-key endpoint answers older clients as before. The
 v0.4.0 `keysource` client asks for version 3, which v0.3.1 does not serve,
 so a service that takes it needs identity v0.4.0; it fills the
@@ -589,6 +600,6 @@ From v0.1.0, v0.2.0 is a breaking release:
 ## Release and module
 
 This page follows the identity README at
-[v0.4.0](https://github.com/tulehq/identity/blob/v0.4.0/README.md), released as
-`ghcr.io/tulehq/identity:0.4.0`. Its Go module is `tule.dev/identity`, with the
+[v0.4.1](https://github.com/tulehq/identity/blob/v0.4.1/README.md), released as
+`ghcr.io/tulehq/identity:0.4.1`. Its Go module is `tule.dev/identity`, with the
 source at [github.com/tulehq/identity](https://github.com/tulehq/identity).

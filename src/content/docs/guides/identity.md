@@ -1,6 +1,6 @@
 ---
 title: Identity and keys
-description: Static keys, identity-issued keys, policies, AssumeRole into member accounts, and what every key shares.
+description: Static keys, identity-issued keys, identity and resource policies, AssumeRole into member accounts, cross-account access, and what every key shares.
 ---
 
 ## Standalone: one static key
@@ -47,8 +47,8 @@ identity has three kinds of principal:
 | Role sessions | A key, secret, session token and expiration, from `AssumeRole` | The role's account |
 
 The root user may do everything. Every other principal may do what its
-identity policies allow, on identity and on every service pointed at it; see
-[Policies](#policies).
+identity policies, and the policies of the resources it acts on, allow, on
+identity and on every service pointed at it; see [Policies](#policies).
 
 ## Create a user and a key
 
@@ -121,23 +121,33 @@ aws sts assume-role \
 ```
 
 A member account's session is a principal of that account. In identity it
-manages that account's users, roles and policies; the other services refuse
-it (see [What is shared](#what-is-shared)).
+manages that account's users, roles and policies. On the other services it
+reaches the management account's resources only where a resource policy
+grants it, as on AWS; see [Cross-account access](#cross-account-access).
 
 ## Policies
 
 identity stores managed and inline identity policies and role trust
-policies, and every service pointed at identity evaluates the policies of
-the keys it issued, as AWS evaluates identity-based policies within one
-account:
+policies. Every service pointed at identity evaluates the identity policies
+of the keys it issued together with the resource policy of what the request
+acts on, as AWS does, with [tule.dev/policy](/policy/)'s `Authorize`:
 
 - The root key is never evaluated, and may do everything.
 - Every other key is evaluated on every request against its principal's
-  policies: a user's inline policies and the default versions of its
-  attached managed policies, or a session's role's, as they are at that
-  request. An explicit `Deny` wins; otherwise the request needs an `Allow`.
+  identity policies, a user's inline policies and the default versions of
+  its attached managed policies, or a session's role's, as they are at that
+  request, and against the resource's policy, if it has one.
+- An explicit `Deny` in either kind of policy wins.
+- **Within the service's account**, an `Allow` in either kind allows. A
+  resource policy that names the principal itself (its user ARN, its role's
+  ARN with the path, its session ARN, or `"*"`) is enough on its own; one
+  that names only the account also needs an identity `Allow`.
+- **Across accounts**, both an identity `Allow` in the caller's account and
+  a resource policy `Allow` are needed; see
+  [Cross-account access](#cross-account-access).
 - **A key with no policy is denied** every request, `AccessDenied` in the
-  service's own protocol, except identity's `GetCallerIdentity`.
+  service's own protocol, except identity's `GetCallerIdentity`, unless a
+  resource policy in its own account names it.
 - Each action is the one the Service Authorization Reference lists for the
   operation, such as `s3:GetObject` on `arn:aws:s3:::<bucket>/<key>`; each
   service's page lists its actions, resources and condition keys.
@@ -165,25 +175,92 @@ The Tule-specific retrieval routes of mailbox and queues are behind
 service's actions, as in `"Action": ["sqs:*", "tule:Inspect"]`. So are the
 retrieval routes of functions.
 
-Not evaluated anywhere: resource-based policies (bucket, queue, secret and
-SES sending policies), permissions boundaries, session policies and service
-control policies. A role session's `aws:PrincipalArn` lacks the role's path
-in object-store, secret-store, accounts, mailbox, queues and functions, so a condition
-on a role ARN with a path does not match a session there.
+The resource policies are object-store's bucket policies, secret-store's
+secret resource policies, queues' queue policies (`Policy` and
+`AddPermission`), functions' function policies and mailbox's sending
+authorization policies; each service's page describes its own. accounts
+serves no resource policy.
+
+A role session's `aws:PrincipalArn` is its role's ARN with the role's path,
+as on AWS, so a condition on a path-scoped role ARN, such as
+`arn:aws:iam::*:role/restricted/*`, matches the role's sessions. The
+services also supply `aws:userid` and `aws:PrincipalTag/<key>`.
+
+Not evaluated anywhere: permissions boundaries, session policies, service
+control policies and resource control policies. Resource policies match
+principals by ARN, so a user or role deleted and created again under the
+same name keeps its grants, where AWS would not. `aws:PrincipalOrgID` is not
+supplied, so a `Deny` written with a negated operator on it denies every
+evaluated principal.
+
+## Cross-account access
+
+A principal of a member account, such as an `OrganizationAccountAccessRole`
+session, reaches a resource of the management account when its own
+identity policies allow the action and the resource's policy grants it,
+directly or through its account. Neither is enough alone.
+
+This walkthrough grants a member account's role session read access to a
+secret and to a bucket, with the [full stack](/getting-started/full-stack/)
+running and the [endpoint variables](/guides/aws-clients/) set. First, as
+the management account's root key, create the secret and the bucket, and
+give each a resource policy naming the member account's role (`<member>`
+is the account ID from `list-accounts`, [above](#into-a-member-account)):
+
+```sh
+aws secretsmanager create-secret --name shared/config --secret-string '{"mode":"demo"}'
+aws secretsmanager put-resource-policy --secret-id shared/config --resource-policy \
+  '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::<member>:role/OrganizationAccountAccessRole"},"Action":"secretsmanager:GetSecretValue","Resource":"*"}]}'
+aws secretsmanager describe-secret --secret-id shared/config --query ARN --output text
+
+aws s3api create-bucket --bucket shared
+echo hello > hello.txt
+aws s3api put-object --bucket shared --key hello.txt --body hello.txt
+aws s3api put-bucket-policy --bucket shared --policy \
+  '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::<member>:role/OrganizationAccountAccessRole"},"Action":"s3:GetObject","Resource":"arn:aws:s3:::shared/*"}]}'
+```
+
+Then assume the role and switch to its session's credentials:
+
+```sh
+aws sts assume-role \
+  --role-arn arn:aws:iam::<member>:role/OrganizationAccountAccessRole \
+  --role-session-name reader
+export AWS_ACCESS_KEY_ID=<AccessKeyId> AWS_SECRET_ACCESS_KEY=<SecretAccessKey> \
+  AWS_SESSION_TOKEN=<SessionToken>
+```
+
+The role has `AdministratorAccess` attached in the member account, which is
+its identity `Allow`; the resource policies are the other half. The session
+can now read both, naming the secret by the ARN `describe-secret` printed,
+since another account must name a secret by its ARN:
+
+```sh
+aws secretsmanager get-secret-value --secret-id <secret ARN>
+aws s3api get-object --bucket shared --key hello.txt copy.txt
+```
+
+Anything the policies do not grant is still refused: a `put-object` to
+`shared`, or a `get-secret-value` of another secret, fails with `... because
+no resource-based policy allows the <action> action`. Detaching
+`AdministratorAccess` from the role refuses the reads too, with `... because
+no identity-based policy allows ...`. Some operations cannot be granted to
+another account at all, such as `ListSecrets`, `CreateSecret`,
+`CreateBucket`, and queues' `CreateQueue` and `SetQueueAttributes`; each
+service's page lists them.
 
 ## What is shared
 
-There is no per-account data isolation, so the services refuse principals
-of any account but their own, `000000000000` by default, identity's default
-management account:
-on AWS such a request would also need a resource-based policy, and none is
-evaluated here. Within that account, every accepted key sees the same data,
-as far as its policies allow:
+There is no per-account data isolation: each service's resources belong to
+its own account, `000000000000` by default, identity's default management
+account. Within that account, every accepted key sees the same data, as far
+as its policies allow, and a principal of another account reaches it only
+through resource policies ([Cross-account access](#cross-account-access)):
 
 - object-store: every bucket and object, in `TULE_Auth_AccountID`;
 - secret-store: every secret, in `TULE_Store_AccountID`;
 - accounts: the one organization. A member account's principal may call
-  `DescribeOrganization` only;
+  `DescribeOrganization` only, as accounts serves no resource policy;
 - mailbox: every stored message, in `TULE_Mailbox_AccountID`;
 - queues: every queue, in `TULE_Queues_AccountID`;
 - functions: every function, in `TULE_Functions_AccountID`. With identity,

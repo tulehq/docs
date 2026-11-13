@@ -1,6 +1,6 @@
 ---
 title: secret-store
-description: "secret-store 0.3.0: a local stand-in for Secrets Manager."
+description: "secret-store 0.4.0: a local stand-in for Secrets Manager."
 ---
 
 An AWS Secrets Manager-compatible secret store that keeps secrets on the local
@@ -10,7 +10,8 @@ staging-label calls work.
 
 It is not a production secret store. Values are kept as plain JSON files on one
 machine and nothing is encrypted. The root key has access to every secret;
-the keys [identity](/identity/) issues have what their IAM policies allow.
+the keys [identity](/identity/) issues have what their IAM policies and the
+secrets' resource policies allow.
 
 ## Running it
 
@@ -20,7 +21,7 @@ With Docker:
 docker run --rm -p 9010:9010 -v secretdata:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
   -e TULE_Store_Seed='{"myapp/config":{"Database":{"Host":"db.internal"}}}' \
-  ghcr.io/tulehq/secret-store:0.3.0
+  ghcr.io/tulehq/secret-store:0.4.0
 ```
 
 The image is based on Alpine, so `docker exec -it <container> sh` gives you a
@@ -47,7 +48,7 @@ Settings come from environment variables prefixed with `TULE_`, and from a
 | `TULE_Server_Port` | `9010` | Listen port |
 | `TULE_Store_RootDir` | `./data` (`/data` in the image) | Where secrets are stored |
 | `TULE_Store_Region` | `us-east-1` | Region in the ARNs the store mints |
-| `TULE_Store_AccountID` | `000000000000` | Account in the ARNs the store mints, and the account whose principals are accepted |
+| `TULE_Store_AccountID` | `000000000000` | Account in the ARNs the store mints, and the account every secret belongs to |
 | `TULE_Store_Seed` | unset | JSON object of secret name to value, created at startup if missing |
 | `TULE_HSTS_MaxAge` | unset | `Strict-Transport-Security` max age; the header is only sent when set |
 | `TULE_Server_ReadTimeout` | `30s` | How long the server may take to read a request, body included |
@@ -90,19 +91,23 @@ treated as an unknown key or as a valid one, and the root key keeps working.
 Unset, the service runs on its own exactly as without identity: only the
 root key is accepted, and identity is never contacted.
 
-identity v0.2.0 or later is required: the service asks the signing-key
-endpoint for each principal's policies, and with an older identity every
-request signed with one of its keys fails with `InternalServiceError`.
+identity v0.4.0 or later is required: the service asks the signing-key
+endpoint for each principal's policies and attributes (a session's role ARN
+with its path, the unique ID, the principal type and the tags), and with an
+older identity every request signed with one of its keys fails with
+`InternalServiceError`.
 
 ### IAM policies
 
 Every request signed with a key identity issued, an IAM user's or a role
 session's, is evaluated against that principal's identity-based policies
-(inline and attached managed, a session carrying its role's) with
-[tule.dev/policy](/policy/): an explicit `Deny` wins, then any `Allow`, and
-otherwise the request is denied. The root key, the root of
+(inline and attached managed, a session carrying its role's) and the
+resource policy of the secret it acts on, together, with
+[tule.dev/policy](/policy/)'s `Authorize` and AWS's logic (see
+[Resource policies](#resource-policies)). The root key, the root of
 `TULE_Store_AccountID`, is never evaluated, so without
-`TULE_Auth_IdentityEndpoint` nothing is.
+`TULE_Auth_IdentityEndpoint` nothing is. A root principal identity reports
+for another account is evaluated like any principal of that account.
 
 **This is a breaking change.** Before, every key identity issued could read
 and write every secret. Now a key whose principal has no policy is denied
@@ -127,11 +132,68 @@ the `SecretId` as the request gave it:
 User: arn:aws:iam::000000000000:user/dev is not authorized to perform: secretsmanager:GetSecretValue on resource: myapp/config because no identity-based policy allows the secretsmanager:GetSecretValue action
 ```
 
-**Cross-account access is refused** until resource-based policies are
-enforced. A principal of another account than `TULE_Store_AccountID`, such
-as a member account's `OrganizationAccountAccessRole` session, is denied
-every operation, since on AWS it would also need a resource policy and every
-account shares this store's secrets.
+or, by the reason, `... with an explicit deny in an identity-based policy`,
+`... with an explicit deny in a resource-based policy` or `... because no
+resource-based policy allows the <action> action`. When both kinds deny, the
+identity-based one is named.
+
+### Resource policies
+
+A secret's resource policy is attached with `PutResourcePolicy`, read with
+`GetResourcePolicy`, removed with `DeleteResourcePolicy` and checked with
+`ValidateResourcePolicy`. It is stored with the secret and read under the
+same lock, so the policy a check evaluates is always the one stored for the
+secret acted on. It is evaluated with the caller's identity policies as AWS
+evaluates them:
+
+- An explicit `Deny` in either kind of policy denies.
+- **Same account:** an `Allow` in either allows. A resource policy that
+  names the principal directly (its user ARN, its role's ARN with the path,
+  which reaches the role's sessions, its session ARN, or `"*"`) is enough
+  without any identity policy. One that names only the account
+  (`000000000000` or `arn:aws:iam::000000000000:root`) also needs the
+  principal's identity `Allow`.
+- **Another account:** both an identity `Allow` and a resource-policy
+  `Allow` naming it, directly or through its account, are needed. Another
+  account's root user needs only the resource-policy grant. `ListSecrets`
+  and `CreateSecret` act on the store's own account, which no resource
+  policy covers, so they are denied to other accounts. Another account must
+  name a secret by its ARN, as Secrets Manager requires: a name is read in
+  the caller's own account, where the store holds no secret, and answers
+  `ResourceNotFoundException` when the caller's identity policies allow it.
+  Cross-account `BatchGetSecretValue` is served, each secret named by ARN
+  and evaluated with its own policy. The
+  [cross-account walkthrough](/guides/identity/#cross-account-access) shows
+  one end to end.
+- A session whose role was deleted is denied everything.
+- A stored policy that no longer parses fails every evaluated request on its
+  secret with `InternalServiceError`; the root key still reaches the secret
+  and can replace or delete the policy.
+
+A secret scheduled for deletion keeps its policy, and only a purge
+(`ForceDeleteWithoutRecovery`) removes it. A secret has one policy, named
+`default`. A `ResourcePolicy` must be 1 to 20,480 characters, and a document
+that is not a valid resource-based policy as tule.dev/policy's
+`ParseResource` reads one is `MalformedPolicyDocumentException` with the
+parser's message and is never stored.
+
+With `BlockPublicPolicy` set, a policy that grants broad access is refused
+with `PublicPolicyException`. AWS documents no exact rule for this, so the
+service applies the one AWS documents for S3 bucket policies: an `Allow`
+whose `Principal` is `"*"` is broad unless its `Condition` fixes, with a
+positive operator and values holding no wildcard or policy variable, one of
+`aws:PrincipalArn`, `aws:PrincipalAccount`, `aws:PrincipalOrgID`,
+`aws:userid`, `aws:SourceArn`, `aws:SourceVpc`, `aws:SourceVpce`,
+`aws:SourceOwner`, `aws:SourceAccount`, or `aws:SourceIp` with ranges no
+broader than a `/8` (IPv4) or `/32` (IPv6). Locally that last rule is weak:
+every caller of a store on a developer's machine connects from loopback, so
+`"Principal": "*"` with `aws:SourceIp` `127.0.0.0/8` is not refused as
+public, yet reaches every principal of every account. `ValidateResourcePolicy`
+reports the same finding as `PolicyValidationPassed: false` with a
+`BROAD_ACCESS` entry in `ValidationErrors`, a name of the service's own; it
+does not check that the policy locks out the caller.
+
+### Actions and condition keys
 
 | Operation | Actions | Resource |
 |---|---|---|
@@ -149,21 +211,35 @@ a caller that may not touch it is denied rather than told it is missing. In
 
 The condition keys supplied are the global `aws:SourceIp`,
 `aws:CurrentTime`, `aws:EpochTime`, `aws:SecureTransport`,
-`aws:PrincipalAccount`, `aws:PrincipalArn`, `aws:RequestedRegion`
-(`TULE_Store_Region`) and, for a user, `aws:username`; with an action on a
-secret, `secretsmanager:SecretId`, `secretsmanager:SecretPrimaryRegion` and
-its tags as `aws:ResourceTag/<key>`; and per operation keys such as
+`aws:RequestedRegion` (`TULE_Store_Region`), `aws:PrincipalTag/<key>` for
+each of the principal's tags (a user's own, or a session's role's), and
+`aws:PrincipalAccount`, `aws:PrincipalArn` (for a role session its role's
+ARN with its path), `aws:userid`, `aws:PrincipalType` and, for a user,
+`aws:username`; with an action on a secret, `secretsmanager:SecretId`,
+`secretsmanager:SecretPrimaryRegion` and its tags as
+`aws:ResourceTag/<key>`; and per operation keys such as
 `secretsmanager:Name`, `secretsmanager:VersionStage`,
-`aws:RequestTag/<key>` and `aws:TagKeys`, listed in the README. Tag keys
+`aws:RequestTag/<key>`, `aws:TagKeys`, `secretsmanager:PolicyName` and
+`secretsmanager:BlockPublicPolicy`, listed in the README. Tag keys
 that repeat, or differ only by case for an evaluated principal, are refused
 with `InvalidParameterException`. Policies are fetched from identity on every
 request, so a change applies on the next one.
 
-Not enforced: resource-based policies; the role's path in
-`aws:PrincipalArn` for a session, so a condition on a role ARN with a path
-does not match one; `aws:PrincipalTag/*` and `aws:userid`; the KMS, rotation
-and replication keys; permissions boundaries, session policies and SCPs; and
-the check that a tag change leaves the caller its access.
+Not enforced: unique IDs in stored resource policies, so a user or role
+deleted and created again under the same name inherits its grants;
+`aws:PrincipalOrgID` and `aws:PrincipalOrgPaths`, so a `Deny` with a negated
+operator on them denies every evaluated principal; service principals, which
+never match; the KMS, rotation and replication keys; permissions boundaries,
+session policies, SCPs and RCPs; and the check that a tag change leaves the
+caller its access.
+
+**Changes from v0.3.0:** identity v0.4.0 is required. A principal of another
+account was denied every operation; it is now allowed what its identity
+policies and the secret's resource policy both grant. `aws:PrincipalArn`
+carries a role's path, so a condition on a role ARN with its path now
+matches the role's sessions, and one on the path-less ARN of a role that has
+a path no longer does. The resource-policy operations are served, where they
+answered `501`.
 
 `TULE_Store_Seed` is read as a JSON object: each key is a secret name, and each
 value becomes that secret's value, a JSON string unquoted and anything else
@@ -248,6 +324,10 @@ curl -fsS --aws-sigv4 aws:amz:us-east-1:secretsmanager --user test:test \
 | `UpdateSecretVersionStage` | Moves one staging label; moving `AWSCURRENT` carries `AWSPREVIOUS` to the version it left, and a label held by another version needs `RemoveFromVersionId` |
 | `TagResource` / `UntagResource` | Tags are stored and reported, and reach IAM conditions as `aws:ResourceTag/<key>`; list filters on them are refused |
 | `BatchGetSecretValue` | By `SecretIdList`, reporting per-secret errors |
+| `PutResourcePolicy` | Attaches the secret's one policy, `default`, replacing any |
+| `GetResourcePolicy` | Without a policy, answers the secret's `ARN` and `Name` only |
+| `DeleteResourcePolicy` | Succeeds whether or not the secret has a policy |
+| `ValidateResourcePolicy` | Checks syntax and broad access without storing; `SecretId` optional |
 
 A secret is addressable by name, by its full ARN, or by its ARN without the
 random suffix, as Secrets Manager allows. An ARN whose last segment ends in
@@ -267,10 +347,10 @@ the version already stored, and reusing one with a different value is a
 - **Nothing is encrypted.** Each secret is one JSON file under
   `TULE_Store_RootDir`, named after a hash of the secret's name, holding its
   metadata and every version of its value in the clear.
-- **One account's secrets.** There is no per-account isolation, so a
-  principal of another account is refused (see [IAM policies](#iam-policies)),
-  and the ARNs keep `TULE_Store_AccountID`. Identity-based policies are
-  enforced; resource policies are not.
+- **One account's secrets.** Every secret belongs to `TULE_Store_AccountID`,
+  and a principal of another account reaches one only through its resource
+  policy (see [Resource policies](#resource-policies)). Identity-based and
+  resource-based policies are enforced.
 - **`KmsKeyId` is stored but does nothing.** It is kept with the secret and
   reported back by `DescribeSecret` and `ListSecrets`, so a client sees its own
   setting, and the server logs a warning naming any secret that asks for a key.
@@ -299,11 +379,9 @@ the version already stored, and reusing one with a different value is a
   `IncludeDeprecated`.
 - **`LastAccessedDate` has day granularity,** as on AWS, and is only written
   when the day changes.
-- **No rotation, no replication, no resource policies.** These return
+- **No rotation, no replication.** These return
   `501 NotImplemented` with a `NotImplementedException`: `RotateSecret`,
-  `CancelRotateSecret`, `GetRandomPassword`, `PutResourcePolicy`,
-  `GetResourcePolicy`, `DeleteResourcePolicy`, `ValidateResourcePolicy`,
-  `ReplicateSecretToRegions`, `RemoveRegionsFromReplication` and
+  `CancelRotateSecret`, `GetRandomPassword`, `ReplicateSecretToRegions`, `RemoveRegionsFromReplication` and
   `StopReplicationToReplica`. A target that names no Secrets Manager
   operation gets `UnknownOperationException`.
 - **Signature verification is request-level.** The method, path, query, signed
@@ -338,6 +416,6 @@ the version already stored, and reusing one with a different value is a
 ## Release and module
 
 This page follows the secret-store README at
-[v0.3.0](https://github.com/tulehq/secret-store/blob/v0.3.0/README.md), released as
-`ghcr.io/tulehq/secret-store:0.3.0`. Its Go module is `tule.dev/secret-store`, with the
+[v0.4.0](https://github.com/tulehq/secret-store/blob/v0.4.0/README.md), released as
+`ghcr.io/tulehq/secret-store:0.4.0`. Its Go module is `tule.dev/secret-store`, with the
 source at [github.com/tulehq/secret-store](https://github.com/tulehq/secret-store).
