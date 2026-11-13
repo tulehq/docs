@@ -25,6 +25,8 @@ of every page. Without identity it makes the cheapest read of the first
 configured service (`ListBuckets`, `ListSecrets`, `DescribeOrganization`,
 `GetAccount`, `ListQueues` or `ListFunctions`). A key the service answers `401`
 or `403` to is refused; a service that cannot be reached is reported as such.
+Without identity, a read the service denies by policy still signs the key in,
+since the service answers it only past the signature check.
 
 What a section shows is what the service allows the signed-in principal. A
 key with no policy signs in, since `GetCallerIdentity` needs no permission,
@@ -53,7 +55,7 @@ member account is refused by every service but identity, and accounts'
 | `/s3` | object-store | Buckets and objects: browse by prefix, upload, download, delete |
 | `/secrets` | secret-store | Secrets, versions and staging labels; reveal, put, delete, restore |
 | `/accounts` | accounts | The organization tree; create the organization, accounts and OUs |
-| `/iam` | identity | IAM users and their access keys |
+| `/iam` | identity | IAM users, their access keys and policies; roles at `/iam/roles` and managed policies at `/iam/policies` |
 | `/mail` | mailbox | Stored messages and rendering failures |
 | `/sqs` | queues | Queues, their attributes and messages; send, purge, delete |
 | `/lambda` | functions | Functions, invocations, event source mappings; invoke |

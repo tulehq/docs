@@ -7,9 +7,10 @@ The compose file [below](#the-file) runs every service and the console,
 wired together: one root key everywhere, every service pointed at identity
 so the keys identity issues work on all of them, each held to its IAM
 policies, and the console pointed at each. It is the console's
-[`compose.yaml`](https://github.com/tulehq/console/blob/v0.1.0/compose.yaml)
-with the images of the current releases; the console's v0.1.0 file pins
-earlier ones, from before the services enforced policies.
+[`compose.yaml`](https://github.com/tulehq/console/blob/v0.2.0/compose.yaml)
+at v0.2.0, which pins the current release of every service, with one
+change: that file names `ghcr.io/tulehq/console:0.1.0` for the console
+itself, and this one `0.2.0`.
 
 ## Start it
 
@@ -53,7 +54,7 @@ only what its policies allow, and nothing until it has one (see
 | mailbox | `ghcr.io/tulehq/mailbox:0.2.0` | 9040 |
 | queues | `ghcr.io/tulehq/queues:0.2.0` | 9050 |
 | functions (profile `functions`) | `ghcr.io/tulehq/functions:0.2.0` | 9060, and 9061 for the Runtime API |
-| console | `ghcr.io/tulehq/console:0.1.0` | 9070 |
+| console | `ghcr.io/tulehq/console:0.2.0` | 9070 |
 
 Each service keeps its data on a named volume. The console holds no data.
 
@@ -145,7 +146,7 @@ services:
     group_add: ["${DOCKER_GID:-0}"]
 
   console:
-    image: ghcr.io/tulehq/console:0.1.0
+    image: ghcr.io/tulehq/console:0.2.0
     depends_on:
       identity: {condition: service_healthy}
       accounts: {condition: service_healthy}
