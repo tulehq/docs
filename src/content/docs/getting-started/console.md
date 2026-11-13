@@ -32,8 +32,14 @@ What a section shows is what the service allows the signed-in principal. A
 key with no policy signs in, since `GetCallerIdentity` needs no permission,
 but sees `AccessDenied` in every section; give its user or role a policy, as
 [Identity and keys](/guides/identity/#policies) shows. A role session of a
-member account is refused by every service but identity, and accounts'
-`DescribeOrganization`.
+member account sees what a resource policy shares with it besides its own
+identity policies, as [cross-account access](/guides/identity/#cross-account-access)
+describes, and of accounts only `DescribeOrganization`.
+
+Each bucket, secret, queue, function and email identity page has a Policy
+section to read, edit and delete its resource-based policy; a save from a
+page whose policy changed since it was loaded is refused rather than
+overwriting the change. See [console](/console/#resource-policies).
 
 ## Sessions
 
@@ -56,7 +62,7 @@ member account is refused by every service but identity, and accounts'
 | `/secrets` | secret-store | Secrets, versions and staging labels; reveal, put, delete, restore |
 | `/accounts` | accounts | The organization tree; create the organization, accounts and OUs |
 | `/iam` | identity | IAM users, their access keys and policies; roles at `/iam/roles` and managed policies at `/iam/policies` |
-| `/mail` | mailbox | Stored messages and rendering failures |
+| `/mail` | mailbox | Stored messages and rendering failures; email identities and their sending authorization policies at `/mail/identities` |
 | `/sqs` | queues | Queues, their attributes and messages; send, purge, delete |
 | `/lambda` | functions | Functions, invocations, event source mappings; invoke |
 

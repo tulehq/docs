@@ -1,6 +1,6 @@
 ---
 title: console
-description: "console 0.2.1: a web console for every Tule service."
+description: "console 0.3.0: a web console for every Tule service."
 ---
 
 A web console for [Tule](https://github.com/tulehq): browse every running
@@ -12,8 +12,10 @@ the key you sign in with.
 
 Each service it is pointed at gets a section: object-store's buckets,
 secret-store's secrets, accounts' organization, identity's users, keys, roles and policies,
-mailbox's messages, queues' queues and functions' functions. A console beside
-a lone object-store shows only buckets.
+mailbox's messages and identities, queues' queues and functions' functions,
+each bucket, secret, queue, function and email identity with its
+resource-based policy. A console beside a lone object-store shows only
+buckets.
 
 ## Running it
 
@@ -23,7 +25,7 @@ With Docker, pointed at services on the host:
 docker run --rm -p 9070:9070 \
   -e TULE_Console_ObjectStoreEndpoint=http://host.docker.internal:9000 \
   -e TULE_Console_MailboxEndpoint=http://host.docker.internal:9040 \
-  ghcr.io/tulehq/console:0.2.1
+  ghcr.io/tulehq/console:0.3.0
 ```
 
 Then open `http://localhost:9070` and sign in. The image is based on Alpine
@@ -43,7 +45,7 @@ accounts' 9020, identity's 9030, mailbox's 9040, queues' 9050 and functions'
 
 ### Every service together, in Docker Compose
 
-[`compose.yaml`](https://github.com/tulehq/console/blob/v0.2.1/compose.yaml) runs every service and the console, wired
+[`compose.yaml`](https://github.com/tulehq/console/blob/v0.3.0/compose.yaml) runs every service and the console, wired
 together: one root key everywhere, every service pointed at identity so the
 keys identity issues work on all of them, each held to its IAM policies, and
 the console pointed at each. It pins the current release of every service.
@@ -70,7 +72,7 @@ x-identity: &identity-endpoint
 
 services:
   identity:
-    image: ghcr.io/tulehq/identity:0.4.0
+    image: ghcr.io/tulehq/identity:0.4.1
     environment:
       <<: *root-key
       TULE_Identity_AccountsEndpoint: http://accounts:9020
@@ -78,35 +80,35 @@ services:
     volumes: [identitydata:/data]
 
   accounts:
-    image: ghcr.io/tulehq/accounts:0.3.0
+    image: ghcr.io/tulehq/accounts:0.4.0
     environment:
       <<: [*root-key, *identity-endpoint]
     ports: ["9020:9020"]
     volumes: [accountsdata:/data]
 
   object-store:
-    image: ghcr.io/tulehq/object-store:0.6.0
+    image: ghcr.io/tulehq/object-store:0.7.0
     environment:
       <<: [*root-key, *identity-endpoint]
     ports: ["9000:9000"]
     volumes: [objectdata:/data]
 
   secret-store:
-    image: ghcr.io/tulehq/secret-store:0.3.0
+    image: ghcr.io/tulehq/secret-store:0.4.0
     environment:
       <<: [*root-key, *identity-endpoint]
     ports: ["9010:9010"]
     volumes: [secretdata:/data]
 
   mailbox:
-    image: ghcr.io/tulehq/mailbox:0.2.0
+    image: ghcr.io/tulehq/mailbox:0.3.0
     environment:
       <<: [*root-key, *identity-endpoint]
     ports: ["9040:9040"]
     volumes: [maildata:/data]
 
   queues:
-    image: ghcr.io/tulehq/queues:0.2.0
+    image: ghcr.io/tulehq/queues:0.3.0
     environment:
       <<: [*root-key, *identity-endpoint]
       # Queue URLs name the host clients on this machine reach queues at.
@@ -115,7 +117,7 @@ services:
     volumes: [queuesdata:/data]
 
   functions:
-    image: ghcr.io/tulehq/functions:0.2.0
+    image: ghcr.io/tulehq/functions:0.3.0
     profiles: [functions]
     depends_on:
       queues: {condition: service_healthy}
@@ -133,7 +135,7 @@ services:
     group_add: ["${DOCKER_GID:-0}"]
 
   console:
-    image: ghcr.io/tulehq/console:0.2.1
+    image: ghcr.io/tulehq/console:0.3.0
     depends_on:
       identity: {condition: service_healthy}
       accounts: {condition: service_healthy}
@@ -276,9 +278,13 @@ first, with JavaScript on.
 
 ### Permissions
 
-Every service evaluates identity's policies for the keys identity issued;
-the root key is always allowed, and a principal of another account, such as
-a member account's role session, is refused by every service but identity.
+Every service evaluates identity's policies for the keys identity issued,
+with the resource-based policy of what the request acts on where the
+service has one ([Resource policies](#resource-policies)); the root key is
+always allowed. A principal of another account, such as a member account's
+role session, is allowed only what a resource policy shares with it besides
+its own identity policies; accounts lets it call only
+`DescribeOrganization`.
 The console asks for nothing beyond what each page needs and shows what the
 service answers: a page the signed-in principal may not read shows that
 service's `AccessDenied` (or `AccessDeniedException`) and its message, with
@@ -296,6 +302,51 @@ as `{"Effect": "Allow", "Action": ["sqs:*", "tule:Inspect"], "Resource":
 "*"}` grants a section and its inspection pages. A function's page without
 `tule:Inspect` shows its configuration and says why its invocations are
 missing.
+
+### Resource policies
+
+A bucket's, secret's, queue's and function's page has a Policy section, and
+an email identity's page its sending authorization policies. The section
+shows the stored policy as indented JSON in a textarea to edit and save
+with the service's own operation, and a delete; a resource without one has
+an empty form with an example naming the resource. Saving sends the
+document as it was typed. A document the service refuses, such as
+object-store's `MalformedPolicy` or secret-store's `PublicPolicyException`,
+is shown next to the form with the service's code and message, and the
+form keeps the document as it was sent.
+
+**A change made since the page was loaded is never lost.** Each form sends
+back the version of the policy the page read (a SHA-256 of the stored
+document, empty for none), and the console reads the policy again before it
+writes. One that changed, whether another client replaced it, added a
+statement with `AddPermission` or deleted it, refuses the save or delete
+with `409`, "The policy changed since the page was loaded", next to the
+form, which keeps the document as sent and shows the stored one below it.
+Saving again from that answer replaces the policy as it is now. A
+function's policy is guarded by its `RevisionId` instead. The check and the
+write are two calls, so a change in between is not caught; creating a named
+sending authorization policy is not checked, since mailbox refuses a name
+the identity has, and removing one statement by its `Sid` is not checked.
+
+A policy the signed-in principal may not read, such as without
+`s3:GetBucketPolicy`, shows the service's `AccessDenied` in the section's
+place, and the rest of the page is shown; a save or delete it may not make
+is shown next to the form the same way. Since a save reads the policy
+first, a principal that may change a policy but not read it is refused.
+
+| Page | Read | Save | Delete | Also |
+|---|---|---|---|---|
+| Bucket, at its root | `GetBucketPolicy` | `PutBucketPolicy` | `DeleteBucketPolicy` | |
+| Secret | `GetResourcePolicy` | `PutResourcePolicy` | `DeleteResourcePolicy` | "Validate" runs `ValidateResourcePolicy` and shows its findings, storing nothing; a `BlockPublicPolicy` box, checked to begin with |
+| Queue | `GetQueueAttributes` `Policy` | `SetQueueAttributes` `Policy` | `SetQueueAttributes` with an empty `Policy` | Each statement listed; one with a `Sid` is removed with `RemovePermission` |
+| Function | `GetPolicy` | `PutResourcePolicy` | `DeleteResourcePolicy` | Each statement listed and removable with `RemovePermission`; every change sends the `RevisionId` the page read, so a policy changed since is refused with `PreconditionFailedException` |
+| Email identity | `GetEmailIdentityPolicies` | `CreateEmailIdentityPolicy` for a new name, `UpdateEmailIdentityPolicy` for one it has | `DeleteEmailIdentityPolicy` | Every named policy in a form of its own, and a form to add one by name |
+
+Each statement is listed with its `Sid`, effect, principal, action,
+resource and condition. Statements are added through the document: there
+is no form for `AddPermission`, though the console lists and removes the
+statements it writes. A secret scheduled for deletion has no Policy
+section, as secret-store answers it nothing until it is restored.
 
 ### Object store
 
@@ -367,6 +418,10 @@ user without IAM permissions sees identity's `AccessDenied`.
 
 ### Mailbox
 
+`/mail/identities`: the email identities, with their type, verification and
+whether sending is enabled. An identity's page has its details and its
+sending authorization policies ([Resource policies](#resource-policies)).
+
 `/mail`: the messages, newest first, with every filter mailbox's retrieval
 API has (from, to, subject, full-text search, since and until, read in
 UTC, configuration set, tags as `name:value` separated by commas, and
@@ -430,7 +485,7 @@ source mapping, each enabled or disabled from there.
   sign-in form has a token of its own in a cookie for the sign-in path.
 - **Static files** are embedded in the binary: one stylesheet, a small
   script, and htmx 2.0.11 from its npm package, unmodified, with its
-  license and checksums in [third_party/htmx](https://github.com/tulehq/console/tree/v0.2.1/third_party/htmx). Nothing is
+  license and checksums in [third_party/htmx](https://github.com/tulehq/console/tree/v0.3.0/third_party/htmx). Nothing is
   loaded from a CDN.
 
 ## Health checks
@@ -448,7 +503,8 @@ shows its service's own readiness.
   checkout and a Docker daemon when both are there, and are skipped
   otherwise.
 - Out of scope: policy versions beyond the default's document, editing a
-  role's trust policy after it is created, groups, permissions boundaries
+  role's trust policy after it is created, creating and deleting email
+  identities, a form for `AddPermission`, groups, permissions boundaries
   and the rest of IAM beyond users, roles, keys and policies, the rarely
   used operations of each API, and views across accounts beyond what the
   signed-in principal's calls return.
@@ -456,6 +512,6 @@ shows its service's own readiness.
 ## Release and module
 
 This page follows the console README at
-[v0.2.1](https://github.com/tulehq/console/blob/v0.2.1/README.md), released as
-`ghcr.io/tulehq/console:0.2.1`. Its Go module is `tule.dev/console`, with the
+[v0.3.0](https://github.com/tulehq/console/blob/v0.3.0/README.md), released as
+`ghcr.io/tulehq/console:0.3.0`. Its Go module is `tule.dev/console`, with the
 source at [github.com/tulehq/console](https://github.com/tulehq/console).

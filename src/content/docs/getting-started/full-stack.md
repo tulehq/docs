@@ -8,9 +8,8 @@ wired together: one root key everywhere, every service pointed at identity
 so the keys identity issues work on all of them, each held to its IAM
 policies and to the resource policies of what it acts on, and the console
 pointed at each. It is the console's
-[`compose.yaml`](https://github.com/tulehq/console/blob/v0.2.1/compose.yaml)
-at v0.2.1 with each service's image moved to its current release; the
-console itself is still v0.2.1.
+[`compose.yaml`](https://github.com/tulehq/console/blob/v0.3.0/compose.yaml)
+at v0.3.0, which pins the current release of every service.
 
 ## Start it
 
@@ -57,7 +56,7 @@ on AWS; see [Cross-account access](/guides/identity/#cross-account-access).
 | mailbox | `ghcr.io/tulehq/mailbox:0.3.0` | 9040 |
 | queues | `ghcr.io/tulehq/queues:0.3.0` | 9050 |
 | functions (profile `functions`) | `ghcr.io/tulehq/functions:0.3.0` | 9060, and 9061 for the Runtime API |
-| console | `ghcr.io/tulehq/console:0.2.1` | 9070 |
+| console | `ghcr.io/tulehq/console:0.3.0` | 9070 |
 
 Each service keeps its data on a named volume. The console holds no data.
 
@@ -149,7 +148,7 @@ services:
     group_add: ["${DOCKER_GID:-0}"]
 
   console:
-    image: ghcr.io/tulehq/console:0.2.1
+    image: ghcr.io/tulehq/console:0.3.0
     depends_on:
       identity: {condition: service_healthy}
       accounts: {condition: service_healthy}
