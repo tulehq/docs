@@ -60,7 +60,7 @@ aws iam create-access-key --user-name dev
 ```
 
 The `CreateAccessKey` response is the only one that carries the secret. The
-new key is denied everything but `GetCallerIdentity` until the user has a
+new key is denied everything but `GetCallerIdentity` until `dev` has a
 policy; see [Policies](#policies). Or with curl:
 
 ```sh
@@ -79,8 +79,10 @@ on the role; within one account, a trust policy that names the caller
 directly is enough. The session carries the role's policies:
 
 ```sh
-aws iam create-role --role-name deployer --assume-role-policy-document   '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::000000000000:user/dev"},"Action":"sts:AssumeRole"}]}'
-aws iam attach-role-policy --role-name deployer   --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
+aws iam create-role --role-name deployer --assume-role-policy-document \
+  '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::000000000000:user/dev"},"Action":"sts:AssumeRole"}]}'
+aws iam attach-role-policy --role-name deployer \
+  --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
 ```
 
 The session lasts `DurationSeconds`, 3600 by default and at most the role's
@@ -125,9 +127,10 @@ it (see [What is shared](#what-is-shared)).
 ## Policies
 
 identity stores managed and inline identity policies and role trust
-policies, and every service pointed at identity evaluates the policies of
-the keys it issued, as AWS evaluates identity-based policies within one
-account:
+policies, and every service pointed at identity but functions evaluates
+the policies of the keys it issued, as AWS evaluates identity-based policies
+within one account. functions v0.1.1 evaluates no policies: every key it
+accepts may call every operation.
 
 - The root key is never evaluated, and may do everything.
 - Every other key is evaluated on every request against its principal's
@@ -144,13 +147,15 @@ To give a user permissions, attach a managed policy or put an inline one.
 `AdministratorAccess`, the one AWS managed policy shipped, allows everything:
 
 ```sh
-aws iam attach-user-policy --user-name dev   --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
+aws iam attach-user-policy --user-name dev \
+  --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
 ```
 
 Or something narrower, such as read access to one bucket:
 
 ```sh
-aws iam put-user-policy --user-name dev --policy-name read-uploads   --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject","s3:ListBucket"],"Resource":["arn:aws:s3:::uploads","arn:aws:s3:::uploads/*"]}]}'
+aws iam put-user-policy --user-name dev --policy-name read-uploads \
+  --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject","s3:ListBucket"],"Resource":["arn:aws:s3:::uploads","arn:aws:s3:::uploads/*"]}]}'
 ```
 
 A change applies on the next request, since nothing is cached. A role gets
@@ -170,7 +175,7 @@ on a role ARN with a path does not match a session there.
 
 There is no per-account data isolation, so the services refuse principals
 of any account but their own, `000000000000` by default, identity's default
-management account:
+management account, functions excepted:
 on AWS such a request would also need a resource-based policy, and none is
 evaluated here. Within that account, every accepted key sees the same data,
 as far as its policies allow:
@@ -181,7 +186,8 @@ as far as its policies allow:
   `DescribeOrganization` only;
 - mailbox: every stored message, in `TULE_Mailbox_AccountID`;
 - queues: every queue, in `TULE_Queues_AccountID`;
-- functions: every function. Each function's containers get the root key by
+- functions: every function, for any accepted key of any account, since it
+  evaluates no policies. Each function's containers get the root key by
   default.
 
 identity itself keeps users, roles and policies per account: what a member

@@ -106,7 +106,7 @@ otherwise the request is denied. The root key, the root of
 
 **This is a breaking change.** Before, every key identity issued could read
 and write every secret. Now a key whose principal has no policy is denied
-every operation. Give the user or role a policy for what it does, for
+every operation. Give the IAM user or role a policy for what it does, for
 example:
 
 ```json

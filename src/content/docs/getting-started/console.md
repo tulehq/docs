@@ -26,9 +26,12 @@ configured service (`ListBuckets`, `ListSecrets`, `DescribeOrganization`,
 `GetAccount`, `ListQueues` or `ListFunctions`). A key the service answers `401`
 or `403` to is refused; a service that cannot be reached is reported as such.
 
-What a section shows is what the service allows the signed-in principal. An IAM
-user, for example, sees identity's `AccessDenied` in the Identity section,
-since only the root user and role sessions may call IAM operations.
+What a section shows is what the service allows the signed-in principal. A
+key with no policy signs in, since `GetCallerIdentity` needs no permission,
+but sees `AccessDenied` in every section; give its user or role a policy, as
+[Identity and keys](/guides/identity/#policies) shows. A role session of a
+member account is refused by every service but identity, and accounts'
+`DescribeOrganization`.
 
 ## Sessions
 

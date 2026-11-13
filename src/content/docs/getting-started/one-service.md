@@ -13,7 +13,7 @@ their own ports.
 docker run --rm -p 9000:9000 -v s3data:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
   -e TULE_Storage_Buckets=uploads,assets \
-  ghcr.io/tulehq/object-store:0.5.0
+  ghcr.io/tulehq/object-store:0.6.0
 ```
 
 - `TULE_Auth_AccessKeyID` and `TULE_Auth_SecretAccessKey` are the one key the
@@ -55,29 +55,29 @@ Path-style addressing always works with object-store; set it in SDK clients
 ```sh
 docker run --rm -p 9010:9010 -v secretdata:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
-  ghcr.io/tulehq/secret-store:0.2.0
+  ghcr.io/tulehq/secret-store:0.3.0
 
 docker run --rm -p 9020:9020 -v accountsdata:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
-  ghcr.io/tulehq/accounts:0.2.0
+  ghcr.io/tulehq/accounts:0.3.0
 
 docker run --rm -p 9030:9030 -v identitydata:/data \
   -e TULE_Auth_AccessKeyID=AKIAIOSFODNN7EXAMPLE \
   -e TULE_Auth_SecretAccessKey=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
-  ghcr.io/tulehq/identity:0.1.0
+  ghcr.io/tulehq/identity:0.4.0
 
 docker run --rm -p 9040:9040 -v mailboxdata:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
-  ghcr.io/tulehq/mailbox:0.1.0
+  ghcr.io/tulehq/mailbox:0.2.0
 
 docker run --rm -p 9050:9050 -v queuesdata:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
-  ghcr.io/tulehq/queues:0.1.0
+  ghcr.io/tulehq/queues:0.2.0
 ```
 
 functions needs the Docker socket; see [functions](/functions/#running-it).
 The console needs at least one service endpoint; see [console](/console/).
 
-A service started alone accepts only its configured key and never contacts
-identity. To also accept keys identity issues, see
-[Identity and keys](/guides/identity/).
+A service started alone accepts only its configured key, evaluates no
+policies, and never contacts identity. To also accept keys identity issues,
+each held to its IAM policies, see [Identity and keys](/guides/identity/).

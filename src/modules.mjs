@@ -33,7 +33,7 @@ export const modules = [
 	{
 		name: 'identity',
 		repo: 'https://github.com/tulehq/identity',
-		description: 'IAM and STS-compatible users, access keys and role sessions.',
+		description: 'IAM and STS-compatible users, roles, policies, access keys and role sessions.',
 	},
 	{
 		name: 'mailbox',
