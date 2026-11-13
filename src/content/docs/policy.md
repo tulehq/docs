@@ -27,8 +27,8 @@ types.
 
 [identity](/identity/) parses the policies it stores with it and evaluates
 identity and trust policies with it, and [object-store](/object-store/),
-[secret-store](/secret-store/), [accounts](/accounts/), [mailbox](/mailbox/)
-and [queues](/queues/) evaluate the identity policies of the keys identity
+[secret-store](/secret-store/), [accounts](/accounts/), [mailbox](/mailbox/),
+[queues](/queues/) and [functions](/functions/) evaluate the identity policies of the keys identity
 issued with it; see [Identity and keys](/guides/identity/#policies).
 
 The full semantics, their sources in the IAM User Guide, and the known gaps

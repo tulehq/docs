@@ -1,6 +1,6 @@
 ---
 title: functions
-description: "functions 0.1.1: a local stand-in for Lambda."
+description: "functions 0.2.0: a local stand-in for Lambda."
 ---
 
 An AWS Lambda-compatible service that runs container-image functions
@@ -11,9 +11,11 @@ synchronously, asynchronously, or from a queue through an event source
 mapping. Any image with a Lambda runtime interface client works: AWS's base
 images, or your own `FROM scratch` image around an `aws-lambda-go` binary.
 
-It is not a production compute service. There are no permissions, every
-access key it accepts shares the same functions, and the functions run as
-plain Docker containers on the daemon it is given.
+It is not a production compute service. Every access key it accepts shares
+the same functions, and the functions run as plain Docker containers on the
+daemon it is given. With [identity](/identity/), the keys identity issues
+are held to their identity policies ([below](#permissions)); standalone, the
+one configured key may do everything.
 
 ## Running it
 
@@ -28,7 +30,7 @@ docker run --rm -p 9060:9060 -p 9061:9061 -v functionsdata:/data \
   -v /var/run/docker.sock:/var/run/docker.sock \
   --group-add "$(stat -c %g /var/run/docker.sock)" \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
-  ghcr.io/tulehq/functions:0.1.1
+  ghcr.io/tulehq/functions:0.2.0
 ```
 
 The image is based on Alpine and runs as the unprivileged `nonroot` user,
@@ -42,7 +44,7 @@ which reaches the socket through the socket's group:
   one `stat` reports on the Mac for `/var/run/docker.sock`. Mount it with
   `-v /var/run/docker.sock:/var/run/docker.sock` and give the group the
   socket has inside the VM, which `docker run --rm -v
-  /var/run/docker.sock:/s ghcr.io/tulehq/functions:0.1.1 stat -c %g /s`
+  /var/run/docker.sock:/s ghcr.io/tulehq/functions:0.2.0 stat -c %g /s`
   would print; if the socket is owned by root with no group access, run the
   image with `--user root` instead. This setup has not been tried.
 
@@ -83,7 +85,7 @@ services:
     volumes: [queuesdata:/data]
 
   functions:
-    image: ghcr.io/tulehq/functions:0.1.1
+    image: ghcr.io/tulehq/functions:0.2.0
     depends_on: [queues]
     environment:
       TULE_Auth_AccessKeyID: test
@@ -132,7 +134,7 @@ Settings come from environment variables prefixed with `TULE_`, and from a
 | `TULE_Functions_PidsLimit` | `1024` | The most processes and threads a container may have, Lambda's quota |
 | `TULE_Functions_IdleTimeout` | `10m` | How long a warm container may sit idle before it is removed |
 | `TULE_Functions_PullImages` | `false` | Whether a function's image is pulled when Docker does not have it. Docker's container create never pulls, so with this off an image must be built or pulled into Docker first. A pull always names the tag (`latest` when the URI has neither a tag nor a digest) or the digest |
-| `TULE_Functions_FunctionCredentials` | `root` | The AWS credentials every container gets (`AWS_ACCESS_KEY_ID`, `AWS_ACCESS_KEY`, `AWS_SECRET_ACCESS_KEY`): `root`, the configured access key; `none`; or `custom`, the key below. See [Calling Tule services from a function](#calling-tule-services-from-a-function) |
+| `TULE_Functions_FunctionCredentials` | `role` with an identity endpoint, else `root` | The AWS credentials every container gets (`AWS_ACCESS_KEY_ID`, `AWS_ACCESS_KEY`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN` for a role): `role`, a session of the function's execution role, assumed through identity, which needs `TULE_Auth_IdentityEndpoint`; `root`, the configured access key; `none`; or `custom`, the key below. See [Calling Tule services from a function](#calling-tule-services-from-a-function) |
 | `TULE_Functions_FunctionAccessKeyID` | unset | With `custom`, the access key the containers get, such as one identity issued with narrower access; set only with `custom` |
 | `TULE_Functions_FunctionSecretAccessKey` | unset | Its secret |
 | `TULE_Functions_AsyncRetryDelay` | `1m` | The wait before an asynchronous invocation that failed runs again; the second retry waits twice this |
@@ -146,7 +148,7 @@ Settings come from environment variables prefixed with `TULE_`, and from a
 | `TULE_Server_ShutdownTimeout` | `7s` | How long a graceful shutdown waits for in-flight requests |
 | `TULE_Auth_AccessKeyID` | required | The access key clients sign requests with, and the key the mappings sign their SQS calls with |
 | `TULE_Auth_SecretAccessKey` | required | Its secret |
-| `TULE_Auth_IdentityEndpoint` | unset | The identity service's base URL, such as `http://localhost:9030`. Set, the keys identity issued are accepted as well as the configured key, and identity is asked about them with the configured key, which must be identity's root key. Unset, functions runs standalone on the configured key alone |
+| `TULE_Auth_IdentityEndpoint` | unset | The identity service's base URL, such as `http://localhost:9030`. Set, the keys identity issued are accepted as well as the configured key, held to their identity policies, and identity is asked about them with the configured key, which must be identity's root key. Unset, functions runs standalone on the configured key alone and evaluates no policy |
 | `TULE_GasEnv` | | `development` logs console output at trace level, `production` logs at warn level, `testing` disables logging |
 
 The server refuses to start without an access key, because every request is
@@ -246,6 +248,68 @@ is `409` `ResourceConflictException`; a bad member is `400`
 outside the model's constraints; a mismatched `RevisionId` is `412`
 `PreconditionFailedException`.
 
+## Permissions
+
+The configured key, which is identity's root key too, is the root user of
+the service's account, `TULE_Functions_AccountID`: it is never evaluated and
+may call every operation. Without `TULE_Auth_IdentityEndpoint` it is the
+only key, so a standalone service evaluates nothing.
+
+With it, every other key identity issued, an IAM user's or a role
+session's, is evaluated on every request against its identity policies (the
+user's inline and attached managed policies, or the session's role's) with
+[tule.dev/policy](/policy/): an explicit `Deny` wins, otherwise the request
+needs an `Allow`. A request no policy allows is `403`
+`AccessDeniedException` with AWS's message:
+
+```
+User: arn:aws:iam::000000000000:user/dev is not authorized to perform: lambda:GetFunction on resource: arn:aws:lambda:us-east-1:000000000000:function:hello because no identity-based policy allows the lambda:GetFunction action
+```
+
+The operation is authorized before the function or mapping is looked up, so
+a denied request on one that does not exist is denied, not `404`.
+
+Each operation is evaluated as the action and resource the
+[Service Authorization Reference for Lambda](https://docs.aws.amazon.com/service-authorization/latest/reference/list_awslambda.html)
+gives it:
+
+| Operation | Action | Resource |
+|---|---|---|
+| `CreateFunction` | `lambda:CreateFunction`, `iam:PassRole` on its `Role`, and `lambda:TagResource` with `Tags` | the function |
+| `GetFunction`, `GetFunctionConfiguration`, `DeleteFunction`, `UpdateFunctionCode` | `lambda:` and the operation | the function |
+| `UpdateFunctionConfiguration` | `lambda:UpdateFunctionConfiguration`, and `iam:PassRole` on a `Role` it sets | the function |
+| `Invoke` | `lambda:InvokeFunction` | the function |
+| `ListFunctions` | `lambda:ListFunctions` | `*` |
+| `TagResource`, `UntagResource`, `ListTags` | `lambda:` and the operation | the function or mapping |
+| `CreateEventSourceMapping` | `lambda:CreateEventSourceMapping`, and `lambda:TagResource` on the new mapping with `Tags` | `*` |
+| `ListEventSourceMappings` | `lambda:ListEventSourceMappings` | `*` |
+| `GetEventSourceMapping`, `UpdateEventSourceMapping`, `DeleteEventSourceMapping` | `lambda:` and the operation | the mapping |
+| The retrieval API, `/_functions/` | `tule:Inspect` | `arn:aws:lambda:<region>:<account>:*` |
+
+A function is `arn:aws:lambda:<region>:<account>:function:<name>` and a
+mapping `arn:aws:lambda:<region>:<account>:event-source-mapping:<UUID>`, in
+the service's own region and account. The operations that take a qualifier
+are also evaluated on the function's ARN with `:$LATEST` when the request
+names it. `GetFunction` returns a function's `Tags` only to a caller allowed
+`lambda:ListTags` on it, as the API reference says. `iam:PassRole` is
+evaluated on the role's ARN with `iam:PassedToService`
+`lambda.amazonaws.com`.
+
+The condition keys supplied are the global `aws:SourceIp`,
+`aws:CurrentTime`, `aws:EpochTime`, `aws:SecureTransport`,
+`aws:RequestedRegion` (`TULE_Functions_Region`), `aws:PrincipalAccount`,
+`aws:PrincipalArn`, `aws:PrincipalType` and, for an IAM user,
+`aws:username`; `aws:ResourceTag/<key>`, `aws:RequestTag/<key>` and
+`aws:TagKeys` for the tagging the reference lists; and `lambda:FunctionArn`
+on the mapping operations.
+
+Functions has no resource-based policies (`AddPermission` is not served), so
+only identity policies decide. **A principal of another account is denied
+every operation**, the retrieval API included, even when its identity
+policies allow it, "because no resource-based policy allows the \<action\>
+action": on AWS a cross-account request also needs a resource-based policy,
+and every account's keys share the same functions.
+
 ## How functions run
 
 **Containers.** Each function's containers are created from the image ID
@@ -287,13 +351,14 @@ Lambda defines: `AWS_LAMBDA_RUNTIME_API`, `AWS_LAMBDA_FUNCTION_NAME`,
 `AWS_LAMBDA_FUNCTION_MEMORY_SIZE`, `AWS_LAMBDA_FUNCTION_VERSION`
 (`$LATEST`), `AWS_LAMBDA_INITIALIZATION_TYPE` (`on-demand`),
 `AWS_LAMBDA_LOG_GROUP_NAME`, `AWS_LAMBDA_LOG_STREAM_NAME`, `AWS_REGION`,
-`AWS_DEFAULT_REGION`, `LAMBDA_TASK_ROOT` and `LAMBDA_RUNTIME_DIR`, and,
-with `TULE_Functions_FunctionCredentials` `root` (the default) or `custom`, the
-credential variables Lambda sets from a function's role:
-`AWS_ACCESS_KEY_ID`, `AWS_ACCESS_KEY` and `AWS_SECRET_ACCESS_KEY`, set to
-the configured key or the custom one.
-`AWS_SESSION_TOKEN` is left unset, since the key is a static one. A
-function may not set the variables the developer guide reserves, these
+`AWS_DEFAULT_REGION`, `LAMBDA_TASK_ROOT` and `LAMBDA_RUNTIME_DIR`, and the
+credential variables Lambda sets from a function's role,
+`AWS_ACCESS_KEY_ID`, `AWS_ACCESS_KEY`, `AWS_SECRET_ACCESS_KEY` and
+`AWS_SESSION_TOKEN`: with `TULE_Functions_FunctionCredentials` `role` (the
+default with identity), a session of the function's role
+([below](#execution-roles)); with `root` (the default standalone) or
+`custom`, the configured key or the custom one, with `AWS_SESSION_TOKEN`
+unset. A function may not set the variables the developer guide reserves, these
 included; the variables take at most 4 KB as JSON.
 
 **Runtime API.** The containers speak Lambda's Runtime API, version
@@ -340,15 +405,23 @@ that stopped it.
 ## Calling Tule services from a function
 
 Lambda gives a function its role's credentials, so the function's SDK can
-call other services. Here every function gets the configured access key,
-`TULE_Auth_AccessKeyID` and its secret, by default
+call other services. With identity, so does this service, by default
+([Execution roles](#execution-roles)): the function's SDK has exactly what
+its role's policies allow, at every Tule service pointed at the same
+identity.
+
+Standalone there are no roles, and every function gets the configured
+access key, `TULE_Auth_AccessKeyID` and its secret
 (`TULE_Functions_FunctionCredentials=root`). **Function code then runs
 with that key's full access**: it is the root key, which every Tule service
-configured with it, or pointed at the same identity, accepts for every
-operation, this service's included. Run only code you trust.
+configured with it accepts for every operation, this service's included.
+Run only code you trust. `root` and `custom` can be chosen with identity
+too, and the service then logs a warning at startup: any principal allowed
+to create or update a function's code and invoke it can run code that reads
+that key, and so obtain its access.
 
 Since the credential variables are reserved, as on Lambda, a function's own
-`Environment` cannot replace them. To give the functions a narrower key,
+`Environment` cannot replace them. To give the functions one narrower key,
 such as one identity issued to a user with no more access than they need,
 set `TULE_Functions_FunctionCredentials=custom` with
 `TULE_Functions_FunctionAccessKeyID` and
@@ -377,11 +450,53 @@ resolves in the containers on Docker Desktop, and on Linux through the
 host-gateway mapping the service adds when `TULE_Functions_RuntimeAPIHost`
 is `host.docker.internal`, its default.
 
+## Execution roles
+
+With `TULE_Functions_FunctionCredentials=role`, the default when
+`TULE_Auth_IdentityEndpoint` is set, a function runs with its execution
+role, the `Role` it was created or updated with, as on Lambda:
+
+- **Each container gets a session of the role,** assumed through identity's
+  [assume-role endpoint](/identity/#the-assume-role-endpoint) as
+  `lambda.amazonaws.com`, with the function's ARN as `aws:SourceArn` and its
+  account as `aws:SourceAccount`, for an hour. Its ARN is
+  `arn:aws:sts::<account>:assumed-role/<role>/<function>`. A warm container
+  is reused only while its session has the function's timeout and a minute
+  left, so no invocation runs with expired credentials.
+- **The role must trust Lambda.** Its trust policy must allow
+  `lambda.amazonaws.com` `sts:AssumeRole`:
+
+  ```json
+  {"Version": "2012-10-17", "Statement": [{"Effect": "Allow",
+    "Principal": {"Service": "lambda.amazonaws.com"}, "Action": "sts:AssumeRole"}]}
+  ```
+
+  `CreateFunction`, and `UpdateFunctionConfiguration` with a `Role`, assume
+  the role once to check it, and refuse one that does not exist or does not
+  trust Lambda with `400` `InvalidParameterValueException`, "The role
+  defined for the function cannot be assumed by Lambda." A role that stops
+  trusting Lambda later, or is deleted, makes the function's next cold start
+  fail with `500` `ServiceException`.
+- **Mappings poll with the role.** The role then needs `sqs:ReceiveMessage`,
+  `sqs:DeleteMessage`, `sqs:GetQueueAttributes` and, here, `sqs:GetQueueUrl`
+  on the queue, in a policy of its own: identity ships no
+  `AWSLambdaSQSQueueExecutionRole`. A role changed on the function is polled
+  with within a minute.
+- **The role is of the service's account.** A `Role` of another account is
+  refused for every caller with `403` `AccessDeniedException`,
+  "Cross-account pass role is not allowed."
+
+With `root`, `custom` or `none`, the `Role` is checked against the model's
+pattern, recorded and passed with `iam:PassRole`, never assumed, and the
+pollers sign with the configured key.
+
 ## Event source mappings
 
 Each enabled mapping runs a poller that calls the queue over the SQS API,
 with the AWS SDK's SQS client, at `TULE_Functions_QueuesEndpoint`, signed
-with the configured key: Tule's queues service or SQS itself. It runs five
+with its function's execution role ([above](#execution-roles)), or with the
+configured key unless the functions run with their roles: Tule's queues
+service or SQS itself. It runs five
 batches at once, or `ScalingConfig.MaximumConcurrency`. It long polls for
 20 seconds, gathers up to `BatchSize` messages for up to the batching
 window after the first arrives (a FIFO queue's batch is one receive's), and
@@ -425,7 +540,9 @@ flight. `LastProcessingResult` is `No records processed`, `OK`, or
 Beside Lambda's API, the service answers JSON routes under `/_functions/`
 that are not AWS's: to read back the invocations it ran, and to reset the
 history between tests. They are signed like every other request, for the
-`lambda` service.
+`lambda` service, and need the root key or a principal allowed
+`tule:Inspect` on `arn:aws:lambda:<region>:<account>:*`
+([Permissions](#permissions)).
 
 | Route | Answer |
 |---|---|
@@ -461,8 +578,9 @@ mapping's batch is one item of its own request ID.
 
 An error is `{"code", "message"}` with the code in `X-Amzn-ErrorType`: `404`
 `ResourceNotFoundException` for an unknown request ID, `400`
-`InvalidParameterValueException` for a bad filter, `limit` or `cursor`, and
-the signature errors of the Lambda API.
+`InvalidParameterValueException` for a bad filter, `limit` or `cursor`,
+`403` `AccessDeniedException` without `tule:Inspect`, and the signature
+errors of the Lambda API.
 
 ```sh
 curl -fsS --aws-sigv4 aws:amz:us-east-1:lambda --user test:test \
@@ -474,13 +592,22 @@ curl -fsS --aws-sigv4 aws:amz:us-east-1:lambda --user test:test \
 
 ## Differences from AWS
 
-- **Every accepted key may call every operation, on the same functions.**
-  There are no permissions and no resource policies. `Role` is checked
-  against the model's pattern and recorded, never assumed.
-- **A function's credentials are a configured key, not its role's.**
-  Each container gets the root key, or with `custom` one key for every
-  function, as `AWS_ACCESS_KEY_ID`, `AWS_ACCESS_KEY` and
-  `AWS_SECRET_ACCESS_KEY`, with no session token, so function code has that
+- **Identity policies only.** Keys identity issued are held to their
+  identity policies; resource-based policies, permissions boundaries,
+  session policies and SCPs are not part of evaluation. Every accepted key
+  works on the same functions. With credentials other than `role`, a `Role`
+  is recorded and never assumed, and whether it exists is not checked.
+- **Duplicate tag keys are refused** with `InvalidParameterValueException`,
+  and for an evaluated principal so are tag keys that differ only in case.
+- **Some condition keys are not supplied.** A role session's
+  `aws:PrincipalArn` lacks the role's path, so a condition on a role ARN
+  that includes a path does not match a session; `aws:userid`,
+  `aws:PrincipalTag/<key>` and the Lambda keys of features the service does
+  not have are not supplied.
+- **A function's role session is refreshed by replacing its container,**
+  where Lambda's runtime keeps an execution environment's credentials valid.
+  Standalone, or with `root` or `custom`, a function gets one configured key
+  instead of its role's, with no session token, and function code has that
   key's full access; `none` gives it none.
 - **Container images only.** `PackageType` `Zip`, which is also what a
   request without a `PackageType` asks for, is refused with
@@ -572,9 +699,22 @@ curl -fsS --aws-sigv4 aws:amz:us-east-1:lambda --user test:test \
   trusted, since nothing is expected in front of this service and the header
   is unsigned.
 
+## Upgrading from v0.1
+
+With identity, v0.2.0 is a breaking release. Identity-issued keys are held
+to their identity policies, so a key whose user or role has no policy
+allowing an action loses access: give it, for example, `lambda:*`,
+`iam:PassRole` on the functions' roles, and `tule:Inspect` for the
+retrieval API. It needs identity v0.3.1, which sends the policies and
+assumes the execution roles; identity v0.4.0 answers it as v0.3.1 did. Functions now run with
+their execution roles, so each function's `Role` must be a role identity has
+that trusts `lambda.amazonaws.com`, with policies for what its code calls.
+Set `TULE_Functions_FunctionCredentials=root` to keep v0.1's root key.
+Standalone use is unchanged.
+
 ## Release and module
 
 This page follows the functions README at
-[v0.1.1](https://github.com/tulehq/functions/blob/v0.1.1/README.md), released as
-`ghcr.io/tulehq/functions:0.1.1`. Its Go module is `tule.dev/functions`, with the
+[v0.2.0](https://github.com/tulehq/functions/blob/v0.2.0/README.md), released as
+`ghcr.io/tulehq/functions:0.2.0`. Its Go module is `tule.dev/functions`, with the
 source at [github.com/tulehq/functions](https://github.com/tulehq/functions).

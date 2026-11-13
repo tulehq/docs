@@ -127,10 +127,9 @@ it (see [What is shared](#what-is-shared)).
 ## Policies
 
 identity stores managed and inline identity policies and role trust
-policies, and every service pointed at identity but functions evaluates
-the policies of the keys it issued, as AWS evaluates identity-based policies
-within one account. functions v0.1.1 evaluates no policies: every key it
-accepts may call every operation.
+policies, and every service pointed at identity evaluates the policies of
+the keys it issued, as AWS evaluates identity-based policies within one
+account:
 
 - The root key is never evaluated, and may do everything.
 - Every other key is evaluated on every request against its principal's
@@ -163,19 +162,20 @@ policies the same way, with `attach-role-policy` and `put-role-policy`.
 
 The Tule-specific retrieval routes of mailbox and queues are behind
 `tule:Inspect`, an action of Tule's own, which a policy names beside the
-service's actions, as in `"Action": ["sqs:*", "tule:Inspect"]`.
+service's actions, as in `"Action": ["sqs:*", "tule:Inspect"]`. So are the
+retrieval routes of functions.
 
 Not evaluated anywhere: resource-based policies (bucket, queue, secret and
 SES sending policies), permissions boundaries, session policies and service
 control policies. A role session's `aws:PrincipalArn` lacks the role's path
-in object-store, secret-store, accounts, mailbox and queues, so a condition
+in object-store, secret-store, accounts, mailbox, queues and functions, so a condition
 on a role ARN with a path does not match a session there.
 
 ## What is shared
 
 There is no per-account data isolation, so the services refuse principals
 of any account but their own, `000000000000` by default, identity's default
-management account, functions excepted:
+management account:
 on AWS such a request would also need a resource-based policy, and none is
 evaluated here. Within that account, every accepted key sees the same data,
 as far as its policies allow:
@@ -186,9 +186,10 @@ as far as its policies allow:
   `DescribeOrganization` only;
 - mailbox: every stored message, in `TULE_Mailbox_AccountID`;
 - queues: every queue, in `TULE_Queues_AccountID`;
-- functions: every function, for any accepted key of any account, since it
-  evaluates no policies. Each function's containers get the root key by
-  default.
+- functions: every function, in `TULE_Functions_AccountID`. With identity,
+  each function's containers get a session of its execution role by
+  default, so function code has what the role's policies allow; see
+  [functions](/functions/#execution-roles).
 
 identity itself keeps users, roles and policies per account: what a member
 account's session creates belongs to that account.
