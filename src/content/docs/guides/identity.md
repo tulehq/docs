@@ -187,11 +187,20 @@ as on AWS, so a condition on a path-scoped role ARN, such as
 services also supply `aws:userid` and `aws:PrincipalTag/<key>`.
 
 Not evaluated anywhere: permissions boundaries, session policies, service
-control policies and resource control policies. Resource policies match
-principals by ARN, so a user or role deleted and created again under the
-same name keeps its grants, where AWS would not. `aws:PrincipalOrgID` is not
-supplied, so a `Deny` written with a negated operator on it denies every
-evaluated principal.
+control policies and resource control policies.
+
+With an identity endpoint, each service binds the IAM user and role ARNs in
+a resource policy's principals to the principals' unique IDs when it stores
+the policy, as AWS does, so a user or role deleted and created again under
+the same name does not keep its grants, and a policy naming a user or role
+that does not exist is refused. A policy stored by an earlier release
+names its principals by ARN and is matched by ARN until it is saved again
+with identity configured. A service running alone never binds: it stores
+policies as they were sent and matches them by ARN. The services also supply `aws:PrincipalOrgID`
+and `aws:PrincipalOrgPaths` for a principal of an account in the
+organization accounts reports; when identity could not ask accounts, both
+are evaluated as unknown, so a condition on them never helps an `Allow` and
+always lets a `Deny` apply. See each service's page for the details.
 
 ## Cross-account access
 

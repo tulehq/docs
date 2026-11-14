@@ -1,6 +1,6 @@
 ---
 title: identity
-description: "identity 0.4.1: a local stand-in for IAM and STS."
+description: "identity 0.5.0: a local stand-in for IAM and STS."
 ---
 
 An AWS IAM- and STS-compatible identity service that keeps users, roles,
@@ -16,7 +16,9 @@ signing key of a request's credential and checks the signature itself, so a
 key created here works against every Tule service, and the service
 evaluates the key's policies, which the endpoint hands over with it. A
 service assumes a role as an AWS service, such as a function's execution
-role, through the [assume-role endpoint](#the-assume-role-endpoint).
+role, through the [assume-role endpoint](#the-assume-role-endpoint), and
+binds the principals of the resource-based policies it stores to unique IDs,
+as AWS does, through the [principal-ID endpoint](#the-principal-id-endpoint).
 
 It is not a production identity service: secrets are stored as they are, and
 only identity-based policies and role trust policies are evaluated
@@ -30,7 +32,7 @@ With Docker:
 docker run --rm -p 9030:9030 -v identitydata:/data \
   -e TULE_Auth_AccessKeyID=AKIAIOSFODNN7EXAMPLE \
   -e TULE_Auth_SecretAccessKey=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
-  ghcr.io/tulehq/identity:0.4.1
+  ghcr.io/tulehq/identity:0.5.0
 ```
 
 The image is based on Alpine, so `docker exec -it <container> sh` gives you a
@@ -64,7 +66,7 @@ Settings come from environment variables prefixed with `TULE_`, and from a
 | `TULE_Auth_AccessKeyID` | required | The root user's access key ID, the key every Tule service is configured with |
 | `TULE_Auth_SecretAccessKey` | required | Its secret |
 | `TULE_Identity_AccountID` | `000000000000` | The management account, the root user's: 12 digits. The default is accounts' default management account |
-| `TULE_Identity_AccountsEndpoint` | unset | The accounts service's base URL, such as `http://localhost:9020`, which `AssumeRole` asks about member accounts. Unset, only roles of the caller's own account can be assumed |
+| `TULE_Identity_AccountsEndpoint` | unset | The accounts service's base URL, such as `http://localhost:9020`, which `AssumeRole` asks about member accounts, and which tells the [organization keys](#the-signing-key-endpoint). Unset, no role of another account can be assumed, and no principal is in an organization |
 | `TULE_HSTS_MaxAge` | unset | `Strict-Transport-Security` max age; the header is only sent when set |
 | `TULE_Server_ReadTimeout` | `30s` | How long the server may take to read a request, body included |
 | `TULE_Server_ReadHeaderTimeout` | `30s` | How long it may take to read a request's headers; must be positive |
@@ -245,7 +247,14 @@ condition keys supplied are `aws:PrincipalArn`, `aws:PrincipalAccount`,
 plus `iam:PolicyARN` for the attach and detach operations,
 `sts:RoleSessionName` for `AssumeRole`, and the tag keys under
 [Differences](#differences-from-aws). They fill policy variables such as
-`${aws:username}` too.
+`${aws:username}` too. `aws:PrincipalOrgID` and `aws:PrincipalOrgPaths` are
+supplied, to identity policies and to the trust policy `AssumeRole`
+evaluates, as the [signing-key endpoint](#the-signing-key-endpoint) reports
+them: for a caller whose account is an `ACTIVE` member of the organization
+or its management account, kept for 30 seconds. When the accounts service
+cannot be asked they are evaluated as unknown, so a condition on them never
+helps an `Allow` and always lets a `Deny` apply, and the failure is logged;
+a request whose policies do not test them is decided as usual.
 
 Each principal acts in its own account: users the root user creates are the
 management account's, users a member account's session creates are that
@@ -325,13 +334,14 @@ uses, since those are all `POST /`.
 
   ```json
   {"AccessKeyId": "AKIA...", "SessionToken": "...", "Date": "20261113",
-   "Region": "us-east-1", "Service": "secretsmanager", "Version": 3}
+   "Region": "us-east-1", "Service": "secretsmanager", "Version": 4}
   ```
 
   `SessionToken` is left out when the request carries none. Each request is
-  answered at the version it asks for: 3 for the current client, 2 for the
-  v0.2.0 to v0.3.1 clients, and without `Version`, as the v0.1.0 client
-  sends it, as v0.1.0 answered. A request above 3 is answered at 3.
+  answered at the version it asks for: 4 for the current client, 3 for the
+  v0.4.0 and v0.4.1 clients, 2 for the v0.2.0 to v0.3.1 clients, and without
+  `Version`, as the v0.1.0 client sends it, as v0.1.0 answered. A request
+  above 4 is answered at 4.
 - **Response.** `200` with the derived signing key for that date, region and
   service, base64-encoded, and the principal the key belongs to. It never
   returns a secret. At version 2 the principal also carries `Root`, true for
@@ -348,6 +358,23 @@ uses, since those are all `POST /`.
   | `PrincipalType` | `aws:PrincipalType` | `User` | `AssumedRole` | `Account` |
   | `Tags` | `aws:PrincipalTag/<key>` | its tags | its role's tags | none |
 
+  At version 4 it also carries its organization keys:
+
+  | Field | Condition key | Value |
+  | --- | --- | --- |
+  | `OrgId` | `aws:PrincipalOrgID` | the organization's ID, `o-...` |
+  | `OrgPaths` | `aws:PrincipalOrgPaths` | the account's path, one value: the organization, root and OU IDs, each followed by a slash, such as `o-a1b2c3d4e5/r-ab12/ou-ab12-11111111/` |
+  | `OrgUnknown` | | `true` when identity could not ask the accounts service |
+
+  A principal of every kind carries them when its account is an `ACTIVE`
+  member of the organization the accounts service reports, or its
+  management account, and none of them otherwise: an account in no
+  organization, one removed from it, a closed or suspended one, or any
+  account when there is no organization or no
+  `TULE_Identity_AccountsEndpoint`. Identity asks the accounts service with
+  `DescribeOrganization`, `DescribeAccount` and `ListParents` up to the
+  root, signed with the root user's key.
+
   ```json
   {"Principal": {"AccountId": "000000000000",
                  "Arn": "arn:aws:sts::000000000000:assumed-role/deployer/release-42",
@@ -356,13 +383,29 @@ uses, since those are all `POST /`.
                  "PrincipalType": "AssumedRole",
                  "Tags": {"Project": "pegasus"},
                  "AccessKeyId": "ASIA...",
+                 "OrgId": "o-a1b2c3d4e5",
+                 "OrgPaths": ["o-a1b2c3d4e5/r-ab12/ou-ab12-11111111/"],
                  "Policies": [{"Version": "2012-10-17", "Statement": [...]}]},
    "SigningKey": "...",
-   "Version": 3}
+   "Version": 4}
   ```
 
   A session's `Arn` names its role without the role's path, so
-  `PrincipalArn` is where its role's ARN is found.
+  `PrincipalArn` is where its role's ARN is found. At version 3 the response
+  has none of version 4's fields, and identity does not ask the accounts
+  service for it.
+- **Staleness.** Identity keeps an account's organization keys for 30
+  seconds, so an account moved, removed or closed, or an organization
+  deleted, keeps its principals' old keys for at most 30 seconds.
+  Concurrent requests of one account share one lookup.
+- **The accounts service unreachable.** When the accounts service cannot be
+  asked, within 5 seconds, the call does not fail: the principal is reported
+  with `OrgUnknown` and neither key, and the failure is logged as a warning
+  naming the account. A failed lookup is kept for 1 second. A service must
+  then supply `aws:PrincipalOrgID` and `aws:PrincipalOrgPaths` to its policy
+  evaluator as unknown, never as absent: an absent key satisfies a negated
+  operator, so `StringNotEquals` on `aws:PrincipalOrgID` would grant, or let
+  a `Deny` lapse, for a principal whose organization is not known.
 - **A session whose role no longer exists.** A session is bound to its
   role's unique ID, so once the role is deleted the session has no role,
   even when a role of the same name is created again. It is answered with
@@ -400,12 +443,14 @@ It maps the refusals to `sigv4.ErrUnknownAccessKey`,
 verifier answers them as it answers its own; `InactiveAccessKey` becomes
 `keysource.ErrInactiveAccessKey`, which wraps `sigv4.ErrUnknownAccessKey`. Any
 other failure is a `*keysource.Error` or a transport error, which a verifier
-reports as `KindKeyLookupFailed`. It asks for version 3 and fills
-`sigv4.Principal.Root`, `Policies`, `PrincipalARN`, `UserID`, `Type` and
-`Tags` from the answer; an identity that answers below version 3, v0.3.1 or
-earlier, is a `*keysource.Error` with the code `VersionUnsupported`. It also
-refuses, with the code `InvalidResponse`, a principal that breaks the
-contract, such as one with more than 50 tags. It caches nothing: every
+reports as `KindKeyLookupFailed`. It asks for version 4 and fills
+`sigv4.Principal.Root`, `Policies`, `PrincipalARN`, `UserID`, `Type`,
+`Tags`, `OrgID`, `OrgPaths` and `OrgUnknown` ([tule.dev/sigv4](/sigv4/)
+v0.5.0) from the answer; an identity that answers below version 4, v0.4.1
+or earlier, is a `*keysource.Error` with the code `VersionUnsupported`. It
+also refuses, with the code `InvalidResponse`, a principal that breaks the
+contract, such as one with more than 50 tags or `OrgUnknown` with either
+organization key. It caches nothing: every
 verification asks identity, so a key deactivated or deleted is refused on
 the next request.
 
@@ -436,7 +481,9 @@ instead. It is `POST /_internal/assume-role`.
 - **Evaluation.** The role's trust policy must allow the service principal
   `sts:AssumeRole`, with `aws:SourceArn` and `aws:SourceAccount` from the
   request, so a trust policy can guard against the confused deputy problem.
-  Identity policies are not evaluated, as a service principal has none.
+  `aws:PrincipalOrgID` and `aws:PrincipalOrgPaths` are not supplied, as a
+  service principal is no member of an organization. Identity policies are
+  not evaluated, as a service principal has none.
   Nothing about the role changes.
 - **Response.** `200` with an ordinary session of the role, which carries the
   role's policies, as an `AssumeRole` session does: `Credentials` and
@@ -463,6 +510,80 @@ s, err := c.AssumeServiceRole(ctx, roleARN, "invocation", "lambda.amazonaws.com"
 It returns `servicerole.ErrNoSuchRole`, `ErrNotTrusted` and
 `ErrInvalidDuration` for those refusals, and a `*servicerole.Error` or a
 transport error otherwise.
+
+## The principal-ID endpoint
+
+An internal endpoint, not an AWS API, through which the other Tule services
+bind the IAM user and role ARNs of the resource-based policies they store,
+such as bucket, queue and secret policies, to unique IDs, as AWS does. AWS
+turns a user or role ARN in a policy's `Principal` into the principal's
+unique ID when the policy is saved, so that a user or role deleted and
+created again under the same ARN is another principal, which the policy does
+not name. Identity does this for its own trust policies already; the
+endpoint does it for everyone else's. It is `POST /_internal/principal-ids`.
+
+- **Authentication.** As the signing-key endpoint's: SigV4 with the root
+  user's key, for the signing name `identity` in `us-east-1`. Anything else
+  is refused, `403` with the sigv4 Kind as the code, before the body is
+  read.
+- **Request.** User and role ARNs to resolve to unique IDs, and user and role
+  unique IDs to resolve to ARNs, at most 1,000 of both together:
+
+  ```json
+  {"Arns": ["arn:aws:iam::000000000000:user/dev", "arn:aws:iam::000000000000:role/app/deployer"],
+   "Ids": ["AIDA..."]}
+  ```
+
+- **Response.** `200` with the unique ID of each ARN that a user or role has
+  now, and the current ARN of each ID that a user or role has. One that no
+  user or role has is left out:
+
+  ```json
+  {"Ids": {"arn:aws:iam::000000000000:user/dev": "AIDA..."},
+   "Arns": {"AIDA...": "arn:aws:iam::000000000000:user/dev"}}
+  ```
+
+- **Refusals.** `400` `InvalidRequest` for a body that is not a request, more
+  than 1,000 values, or a value that is not a user or role ARN or unique ID.
+  A failure of the store is `500`.
+
+### The principals client
+
+`tule.dev/identity/principals` is the endpoint's client, for a service that
+stores resource-based policies:
+
+```go
+c, err := principals.New(principals.Config{
+	Endpoint:        "http://localhost:9030",
+	AccessKeyID:     rootKeyID,
+	SecretAccessKey: rootSecret,
+})
+stored, err := c.Bind(ctx, doc) // on save, after policy.ParseResource accepted doc
+shown, err := c.Show(ctx, stored) // on Get
+```
+
+- **`Bind`** replaces each user and role ARN in the `AWS` values of the
+  policy's `Principal` and `NotPrincipal` elements with the unique ID of the
+  user or role that has it now. Account IDs, root ARNs, session ARNs, `*`,
+  unique IDs, other principal types and ARNs in conditions are kept. A
+  policy that names an ARN no user or role has is a
+  `*principals.InvalidPrincipalError`, which matches
+  `principals.ErrInvalidPrincipal`; the service answers with its own API's
+  refusal, such as S3's `MalformedPolicy` "Invalid principal in policy".
+- **`Show`** turns each unique ID that a user or role still has back into
+  its current ARN, and leaves one that no user or role has as the ID, as AWS
+  shows it.
+- **Evaluation** uses the stored, bound policy: [tule.dev/policy](/policy/)
+  matches an `AIDA...` or `AROA...` principal against the caller's `UserID`,
+  so a user or role created again under the same ARN is not granted.
+
+Both keep the document as it was written, rewriting only the principal
+values. A failure of the call is a `*principals.Error` or a transport error.
+The client caches nothing.
+
+A service run without identity has no principal IDs to bind to: it stores
+policies as they were sent and matches them by ARN, so a recreated user or
+role inherits what its ARN was granted.
 
 ## Differences from AWS
 
@@ -565,6 +686,23 @@ transport error otherwise.
 
 ## Upgrading
 
+From v0.4.1, the signing-key endpoint answers older clients as before, and
+asks the accounts service nothing for them. The `keysource` client now asks
+for version 4, which v0.4.1 does not serve, so a service that takes it needs
+identity v0.5.0; it fills the `sigv4.Principal` fields
+[tule.dev/sigv4](/sigv4/) v0.5.0 added, and a service must supply the
+organization keys as unknown for a principal with `OrgUnknown`. Policy
+evaluation takes tule.dev/policy v0.3.0, whose unknown context keys identity
+uses for `aws:PrincipalOrgID` and `aws:PrincipalOrgPaths` when the accounts
+service cannot be asked, where v0.4.1 never supplied them and evaluated them
+as absent. With the accounts service reachable, they now carry the caller's
+organization, so a condition on them that never held, or a negated one that
+always did, now follows the organization. Resource-based policies stored
+before a service adopts [`principals.Bind`](#the-principals-client) are
+unbound: they keep matching by ARN, so a user or role created again under
+such an ARN is granted what the deleted one was, until the policy is saved
+again.
+
 From v0.4.0, trust policies are parsed with tule.dev/policy v0.2.0, which
 refuses an `AWS` principal ARN with a region or with an account that is not
 12 digits. `CreateRole` and `UpdateAssumeRolePolicy` with such a principal,
@@ -600,6 +738,6 @@ From v0.1.0, v0.2.0 is a breaking release:
 ## Release and module
 
 This page follows the identity README at
-[v0.4.1](https://github.com/tulehq/identity/blob/v0.4.1/README.md), released as
-`ghcr.io/tulehq/identity:0.4.1`. Its Go module is `tule.dev/identity`, with the
+[v0.5.0](https://github.com/tulehq/identity/blob/v0.5.0/README.md), released as
+`ghcr.io/tulehq/identity:0.5.0`. Its Go module is `tule.dev/identity`, with the
 source at [github.com/tulehq/identity](https://github.com/tulehq/identity).

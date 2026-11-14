@@ -1,6 +1,6 @@
 ---
 title: mailbox
-description: "mailbox 0.3.0: a local stand-in for SES v2."
+description: "mailbox 0.4.0: a local stand-in for SES v2."
 ---
 
 An Amazon SES v2-compatible mail service that never delivers mail. Every
@@ -23,7 +23,7 @@ With Docker:
 ```sh
 docker run --rm -p 9040:9040 -v mailboxdata:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
-  ghcr.io/tulehq/mailbox:0.3.0
+  ghcr.io/tulehq/mailbox:0.4.0
 ```
 
 The image is based on Alpine, so `docker exec -it <container> sh` gives you a
@@ -61,8 +61,8 @@ Settings come from environment variables prefixed with `TULE_`, and from a
 | `TULE_Server_ShutdownTimeout` | `7s` | How long a graceful shutdown waits for in-flight requests |
 | `TULE_Auth_AccessKeyID` | required | The access key clients sign requests with |
 | `TULE_Auth_SecretAccessKey` | required | Its secret |
-| `TULE_Auth_IdentityEndpoint` | unset | The identity service's base URL, such as `http://localhost:9030`: an absolute http or https URL. Set, the keys identity issued are accepted as well as the configured key, held to their identity policies ([Permissions](#permissions)), and identity is asked about them with the configured key, which must be identity's root key. Identity 0.4.0 or later is required. Unset, mailbox runs standalone on the configured key alone |
-| `TULE_Mailbox_AccountID` | `000000000000` | The account mailbox's resources belong to: 12 digits. The root key acts in it and the ARNs carry it. The default is identity's default management account |
+| `TULE_Auth_IdentityEndpoint` | unset | The identity service's base URL, such as `http://localhost:9030`: an absolute http or https URL. Set, the keys identity issued are accepted as well as the configured key, held to their identity policies ([Permissions](#permissions)), the principals of stored sending authorization policies are bound to unique IDs ([Sending authorization](#sending-authorization)), and identity is asked about them with the configured key, which must be identity's root key. Identity 0.5.0 or later is required. Unset, mailbox runs standalone on the configured key alone |
+| `TULE_Mailbox_AccountID` | `000000000000` | The account mailbox's resources belong to: 12 digits. The root key acts in it and the ARNs carry it; a principal of any other account needs an email identity's sending authorization policy as well as its own identity policy ([Sending authorization](#sending-authorization)). The default is identity's default management account |
 | `TULE_Mailbox_Region` | `us-east-1` | The region the ARNs carry and `aws:RequestedRegion` is, whatever region a request was signed for |
 | `TULE_GasEnv` | | `development` logs console output at trace level, `production` logs at warn level, `testing` disables logging |
 
@@ -174,7 +174,16 @@ user's or the role's tags; and, from the attributes identity reports,
 path, so `arn:aws:iam::*:role/restricted/*` matches a session of
 `role/restricted/admin`), `aws:PrincipalAccount`, `aws:userid`,
 `aws:PrincipalType` (`User`, `AssumedRole` or `Account`) and, for an IAM
-user, `aws:username`. SES operations also
+user, `aws:username`. `aws:PrincipalOrgID` and `aws:PrincipalOrgPaths` are
+the organization and the account's path in it (`o-.../r-.../ou-.../`, one
+path), as identity reports them for a principal whose account is an active
+member of the organization the accounts service knows, or its management
+account; they are absent for any other principal. Identity keeps an
+account's organization for up to 30 seconds, so an account moved or removed
+keeps its old keys that long. When identity could not ask the accounts
+service, both keys are evaluated as unknown, never as absent: a condition
+on them then never helps an `Allow` apply and always helps a `Deny` apply.
+SES operations also
 supply `ses:ApiVersion` (`2`); `SendEmail` supplies `ses:FromAddress`,
 `ses:FromDisplayName`, `ses:Recipients` and `ses:FeedbackAddress`; creates
 supply `aws:RequestTag/<key>` and `aws:TagKeys`; and an existing identity or
@@ -194,6 +203,35 @@ tule.dev/policy's `ParseResource`, and every statement's `Resource` the
 identity's ARN (or that ARN with `*` for its region); `NotResource` is
 refused. Any action is accepted in a document, though only a send is
 evaluated with it.
+
+**Principals are bound to unique IDs** when a policy is stored, as AWS
+binds them. With an identity endpoint, `CreateEmailIdentityPolicy` and
+`UpdateEmailIdentityPolicy` ask identity's
+[principal-ID endpoint](/identity/#the-principal-id-endpoint) for the unique
+ID of each IAM user and role ARN in the document's `Principal` and
+`NotPrincipal`, and store the document with each such ARN replaced by the
+`AIDA...` or `AROA...` ID of the IAM user or role that has it now; account
+IDs, root ARNs, session ARNs, `"*"`, service principals and ARNs in
+conditions are kept. A send is evaluated with the stored document, so a
+user or role deleted and created again under the same name is another
+principal, which the policy does not name, until the policy is saved again.
+The bound document is held to the 4 KB limit again, since a unique ID can be
+longer than the ARN it replaces.
+
+- **A user or role that does not exist** is refused with
+  `BadRequestException`, `Invalid policy: Invalid principal in policy:
+  "AWS":"<arn>"`. A caller that may not write the policy is denied without
+  a call to identity.
+- **Reads show the policy as AWS shows it.** `GetEmailIdentityPolicies` and
+  `GetEmailIdentity` show a unique ID whose user or role still exists as its
+  current ARN, and one that no longer exists as the ID.
+- **Identity is asked outside the resource lock**, so a slow identity holds
+  up no other operation; a send never asks it. When identity cannot be
+  asked, the write fails with `500` `InternalFailure` and stores nothing,
+  and the read fails the same way; both are logged. Each call is bounded by
+  10 seconds.
+- **Standalone** (no identity endpoint) nothing is bound: a policy is stored
+  and returned as it was sent, and matched by ARN.
 
 **A send** is evaluated on the identity it sends from, with every policy
 that identity has. A `Deny` in any policy denies, and an `Allow` in any
@@ -226,12 +264,11 @@ policies: `ses:FromAddress`, `ses:FromDisplayName`, `ses:Recipients`,
 
 The gaps, as the README lists them:
 
-- Principals match by ARN, where AWS converts a stored ARN to the
-  principal's unique ID, so a user or role deleted and created again under
-  the same name inherits its grants. A session whose role was deleted is
-  denied.
-- `aws:PrincipalOrgID` and `aws:PrincipalOrgPaths` are not supplied, so a
-  `Deny` with a negated operator on them denies every evaluated principal.
+- Policies stored before 0.4 are not bound. They keep matching by ARN, so a
+  user or role deleted and created again under the same name inherits their
+  grants, until each is saved again
+  ([Upgrading from 0.3](#upgrading-from-03)). Standalone, every policy
+  matches by ARN.
 - Service, federated-user and `CanonicalUser` principals never match a
   caller.
 - A delegate sender needs no identity ARN: every identity is mailbox's
@@ -677,6 +714,27 @@ curl.
   trusted, since nothing is expected in front of this service and the header
   is unsigned.
 
+## Upgrading from 0.3
+
+- **identity v0.5.0 or later** (signing-key version 4) is required: the keys
+  of an older identity are refused.
+- **Sending authorization policies are bound to unique IDs** when they are
+  stored with an identity endpoint
+  ([Sending authorization](#sending-authorization)). A policy naming a user
+  or role that does not exist is now refused with `BadRequestException`, and
+  reads show a deleted principal's unique ID in place of its ARN. The
+  policies 0.3 stored are not bound on upgrade: they keep matching by ARN,
+  so a user or role deleted and created again under the same name inherits
+  their grants, until each is saved again. To bind them, read each with
+  `GetEmailIdentityPolicies` and write it back with
+  `UpdateEmailIdentityPolicy`; a policy naming a principal that no longer
+  exists is then refused, and must be corrected first.
+- **`aws:PrincipalOrgID` and `aws:PrincipalOrgPaths` are supplied.** A
+  condition on them that never held, or a negated one that always did, now
+  follows the principal's organization; a `Deny` written as "deny everyone
+  outside my organization" no longer denies the organization's own
+  principals.
+
 ## Upgrading from 0.2
 
 - **Cross-account requests are evaluated.** 0.2 refused every principal of
@@ -719,6 +777,6 @@ curl.
 ## Release and module
 
 This page follows the mailbox README at
-[v0.3.0](https://github.com/tulehq/mailbox/blob/v0.3.0/README.md), released as
-`ghcr.io/tulehq/mailbox:0.3.0`. Its Go module is `tule.dev/mailbox`, with the
+[v0.4.0](https://github.com/tulehq/mailbox/blob/v0.4.0/README.md), released as
+`ghcr.io/tulehq/mailbox:0.4.0`. Its Go module is `tule.dev/mailbox`, with the
 source at [github.com/tulehq/mailbox](https://github.com/tulehq/mailbox).

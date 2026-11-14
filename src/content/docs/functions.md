@@ -1,6 +1,6 @@
 ---
 title: functions
-description: "functions 0.3.0: a local stand-in for Lambda."
+description: "functions 0.5.0: a local stand-in for Lambda."
 ---
 
 An AWS Lambda-compatible service that runs container-image functions
@@ -30,7 +30,7 @@ docker run --rm -p 9060:9060 -p 9061:9061 -v functionsdata:/data \
   -v /var/run/docker.sock:/var/run/docker.sock \
   --group-add "$(stat -c %g /var/run/docker.sock)" \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
-  ghcr.io/tulehq/functions:0.3.0
+  ghcr.io/tulehq/functions:0.5.0
 ```
 
 The image is based on Alpine and runs as the unprivileged `nonroot` user,
@@ -44,7 +44,7 @@ which reaches the socket through the socket's group:
   one `stat` reports on the Mac for `/var/run/docker.sock`. Mount it with
   `-v /var/run/docker.sock:/var/run/docker.sock` and give the group the
   socket has inside the VM, which `docker run --rm -v
-  /var/run/docker.sock:/s ghcr.io/tulehq/functions:0.3.0 stat -c %g /s`
+  /var/run/docker.sock:/s ghcr.io/tulehq/functions:0.5.0 stat -c %g /s`
   would print; if the socket is owned by root with no group access, run the
   image with `--user root` instead. This setup has not been tried.
 
@@ -77,7 +77,7 @@ Event source mappings poll a queue over the SQS API. With
 ```yaml
 services:
   queues:
-    image: ghcr.io/tulehq/queues:0.3.0
+    image: ghcr.io/tulehq/queues:0.5.0
     environment:
       TULE_Auth_AccessKeyID: test
       TULE_Auth_SecretAccessKey: test
@@ -85,7 +85,7 @@ services:
     volumes: [queuesdata:/data]
 
   functions:
-    image: ghcr.io/tulehq/functions:0.3.0
+    image: ghcr.io/tulehq/functions:0.5.0
     depends_on: [queues]
     environment:
       TULE_Auth_AccessKeyID: test
@@ -318,7 +318,15 @@ The condition keys supplied are the global `aws:SourceIp`,
 from the tags of the IAM user or the session's role, `aws:PrincipalAccount`,
 `aws:PrincipalArn` (for a role session its role's ARN with the role's
 path), `aws:userid`, `aws:PrincipalType` and, for an IAM user,
-`aws:username`; `aws:ResourceTag/<key>`, `aws:RequestTag/<key>` and
+`aws:username`; `aws:PrincipalOrgID` and `aws:PrincipalOrgPaths` (one
+path, `o-.../r-.../ou-.../`) for a principal whose account is an active
+member, or the management account, of the organization identity's accounts
+service reports, from signing-key version 4 (identity keeps them for 30
+seconds, so an account moved or removed keeps its old keys for at most that
+long), and neither for any other principal, as AWS leaves them out; when
+identity could not ask the accounts service, both are evaluated as unknown,
+so a condition on them never helps an `Allow`, a negated one included, and
+always lets a `Deny` apply; `aws:ResourceTag/<key>`, `aws:RequestTag/<key>` and
 `aws:TagKeys` for the tagging the reference lists; `lambda:FunctionArn` on
 the mapping operations; and `lambda:Principal` and
 `lambda:FunctionUrlAuthType` on `AddPermission`.
@@ -345,6 +353,33 @@ Each function has at most one resource-based policy, its function policy:
   names another function is stored and has no effect.
 - **GetPolicy** and **GetResourcePolicy** return the document and its
   `RevisionId`, `404` when the function has none.
+
+**Principals are stored by unique ID.** With an identity endpoint, a
+policy is saved as AWS saves one: each IAM user or role ARN in its
+`Principal` and `NotPrincipal` elements is replaced by that user's or
+role's unique ID (`AIDA...`, `AROA...`), through identity's principal-ID
+endpoint, before it is stored, and the stored document is what is
+evaluated. As on AWS, a user or role deleted and created again under the
+same name is not granted what the old one was. Account IDs, `:root` ARNs,
+`"*"`, assumed-role session ARNs, service principals and ARNs in
+conditions, such as `aws:PrincipalArn`, are kept as written. Every read of
+the policy shows it back: a unique ID that a user or role still has is its
+current ARN, and one that none has stays the ID, as AWS shows it.
+`AddPermission` binds the statement it adds, and leaves the policy's other
+statements as they are stored.
+
+A user or role ARN that no user or role has is refused, and nothing is
+stored: `AddPermission` and `PutResourcePolicy` both answer `400`
+`InvalidParameterValueException`, "The provided principal was invalid.
+Please check the principal and try again." The bound policy is held to the
+20 KB limit too. When identity cannot be asked, a write that names a user or
+role fails with `500` `ServiceException` and stores nothing, and a read of a
+policy holding a unique ID fails the same way; evaluation never asks
+identity for this. `AddPermission` and `PutResourcePolicy` hold the function
+while they wait for identity, so **an identity that does not answer stalls
+the operations on that function, `Invoke` included**, for up to the 10
+seconds the service waits for it. Standalone, with no identity endpoint,
+nothing is bound: policies are stored as sent and matched by ARN.
 
 A change is refused when the resulting policy is over 20 KB (`400`
 `PolicyLengthExceededException`) or does not parse as a resource-based
@@ -631,7 +666,7 @@ history between tests. They are signed like every other request, for the
 
 | Route | Answer |
 |---|---|
-| `GET /_functions/invocations` | `200` with `{"items": [invocation, ...], "nextCursor": "..."}`, newest first. `function`, `status` (`succeeded`, `failed`, `timedOut`), `source` (`invoke`, `async`, `eventSourceMapping`), `since` and `until` (RFC 3339, inclusive) filter it; `limit` is 1 to 100, 20 by default; `cursor` takes the `nextCursor` of the page before, which the last page leaves out |
+| `GET /_functions/invocations` | `200` with `{"items": [invocation, ...], "nextCursor": "..."}`, newest first. `function`, `status` (`succeeded`, `failed`, `timedOut`), `source` (`invoke`, `async`, `eventSourceMapping`, `service`), `since` and `until` (RFC 3339, inclusive) filter it; `limit` is 1 to 100, 20 by default; `cursor` takes the `nextCursor` of the page before, which the last page leaves out |
 | `GET /_functions/invocations/{requestId}` | `200` with the invocation, its `payload`, its `result` and its whole `log` |
 | `DELETE /_functions/invocations` | `204`: empties the history |
 
@@ -659,7 +694,9 @@ An invocation is:
 a success. `payload` and `result` are the bytes as text, and only the item
 read back by its request ID carries them and the log. An asynchronous
 invocation is one item, its last attempt, with `attempts` counting them; a
-mapping's batch is one item of its own request ID.
+mapping's batch is one item of its own request ID. An invocation through
+the [service invoke endpoint](#the-service-invoke-endpoint), of either
+type, has the source `service`.
 
 An error is `{"code", "message"}` with the code in `X-Amzn-ErrorType`: `404`
 `ResourceNotFoundException` for an unknown request ID, `400`
@@ -675,6 +712,115 @@ curl -fsS --aws-sigv4 aws:amz:us-east-1:lambda --user test:test \
   -X DELETE http://localhost:9060/_functions/invocations
 ```
 
+## The service invoke endpoint
+
+An internal endpoint, not an AWS API, through which a Tule service invokes
+a function as an AWS service principal, as Secrets Manager invokes a
+rotation function as `secretsmanager.amazonaws.com`. The function policy
+must allow the service `lambda:InvokeFunction`, as the Secrets Manager User
+Guide adds it with `aws lambda add-permission --action
+lambda:InvokeFunction --principal secretsmanager.amazonaws.com
+--source-account <account>`. `Invoke` evaluates the caller's identity, and
+no caller is a service, so a Tule service invokes such a function through
+this endpoint instead. It is `POST /_internal/invoke`, modeled on
+identity's [assume-role endpoint](/identity/#the-assume-role-endpoint).
+
+- **Authentication.** SigV4 for the signing name `lambda`, with the root
+  key: the configured `TULE_Auth_AccessKeyID`, or, with identity, a key
+  identity issued the root user of the service's account
+  (`TULE_Functions_AccountID`). Any other key, an IAM user's or a role
+  session's whatever its policies allow, is refused as unknown. A refusal
+  is `403` with the sigv4 Kind as the code, such as `MissingAuth`,
+  `UnknownAccessKey`, `SignatureMismatch` or `WrongService`. A key lookup
+  identity fails is `500` `InternalFailure`, and a body over 7 MiB is `413`
+  `RequestTooLarge`.
+- **Request.**
+
+  ```json
+  {"FunctionName": "rotate", "ServicePrincipal": "secretsmanager.amazonaws.com",
+   "SourceArn": "arn:aws:secretsmanager:us-east-1:000000000000:secret:db-AbCdEf",
+   "SourceAccount": "000000000000", "InvocationType": "RequestResponse",
+   "Payload": {"Step": "createSecret"}}
+  ```
+
+  `FunctionName` is resolved as `Invoke` resolves it. `ServicePrincipal` is
+  DNS labels ending in `.amazonaws.com`. `SourceArn`, an ARN of at most 1024
+  characters, and `SourceAccount`, 12 digits, are optional: the resource the
+  service acts for and its account, such as a secret's. `InvocationType` is
+  `RequestResponse`, the default, or `Event`. `Payload` is the event, any
+  JSON value, `{}` when left out, within `Invoke`'s limits (6 MB for
+  `RequestResponse`, 1 MB for `Event`), and the function gets its bytes as
+  they are.
+- **Evaluation.** Only the function policy is evaluated, with
+  tule.dev/policy's `AuthorizeService`, as a service principal has no
+  identity policies. It must allow the service principal
+  `lambda:InvokeFunction` on the function, with the resource rules of
+  `Invoke` ([Write `Resource` to cover `:$LATEST`](#function-policies)). A
+  `Deny` that applies refuses it, and so does a function without a policy,
+  or whose policy names no such service. A `Service` value matches only the
+  service principal it names exactly. `Principal` `"*"` names a service too,
+  in an `Allow` and a `Deny` alike, and `NotPrincipal` `"*"` exempts one, as
+  AWS documents it, so an `Allow` of `"*"` should carry an `aws:SourceArn`
+  or `aws:SourceAccount` condition, or it lets every service invoke the
+  function. The context is `aws:SourceArn` and `aws:SourceAccount` from the
+  request when given, so a policy can guard against the confused deputy
+  problem; `aws:PrincipalServiceName` and `aws:PrincipalIsAWSService`;
+  `aws:CurrentTime`, `aws:EpochTime`, `aws:SecureTransport` and
+  `aws:RequestedRegion`; and the function's `aws:ResourceTag/<key>`.
+  `aws:SourceIp`, `aws:SourceOrgID` and `aws:SourceOrgPaths` are not
+  supplied, nor are `aws:ViaAWSService` and `aws:ResourceAccount`, which
+  `Invoke` does not supply either.
+- **Execution.** Exactly as an `Invoke` of the same type: the same
+  runner, timeout, state checks and, for `Event`, retries. The history
+  records it with the source `service` ([Retrieval API](#retrieval-api)).
+- **Response.** `X-Amzn-RequestId` is the invocation's request ID, under
+  which the retrieval API keeps it. `200` for `RequestResponse`, with the
+  function's result, or its error document when it failed, as the
+  `Payload`:
+
+  ```json
+  {"StatusCode": 200, "ExecutedVersion": "$LATEST", "FunctionError": "Unhandled",
+   "Payload": {"errorMessage": "...", "errorType": "..."}}
+  ```
+
+  `FunctionError` is left out when the function succeeded, and `Payload`
+  when it returned nothing. `202` `{"StatusCode": 202}` for `Event`, once
+  it is queued.
+- **Refusals.** `{"Code": "...", "Message": "..."}`, the shape of
+  identity's internal endpoints' errors: `404` `ResourceNotFound` (no such
+  function, or an ARN of another account or region), `403` `AccessDenied`
+  (the function policy does not allow the service), `409`
+  `ResourceConflict` (the function is pending, failed, or updating without
+  an image it can run), `400` `InvalidRequest`, `413` `RequestTooLarge`,
+  `429` `TooManyRequests` (the function at its container cap), and `502`
+  `InvalidFunctionResponse` when the function ran and its result is not
+  JSON; that invocation is in the history. A failure of the store is `500`
+  `InternalFailure`.
+
+### The service invoke client
+
+`tule.dev/functions/serviceinvoke` is the endpoint's client:
+
+```go
+c, err := serviceinvoke.New(serviceinvoke.Config{
+	Endpoint:        "http://localhost:9060",
+	Region:          "us-east-1",
+	AccessKeyID:     rootKeyID,
+	SecretAccessKey: rootSecret,
+})
+res, err := c.Invoke(ctx, "rotate", "secretsmanager.amazonaws.com", event,
+	serviceinvoke.WithSourceArn(secretARN),
+	serviceinvoke.WithSourceAccount(accountID))
+```
+
+`WithEvent()` makes the invocation `Event`. `res` carries `RequestID`,
+`StatusCode`, `ExecutedVersion`, `FunctionError` and `Payload`. The
+payload is sent, and the result returned, byte for byte; a payload that
+is not JSON is an error before anything is sent. It returns
+`serviceinvoke.ErrNotFound`, `ErrAccessDenied` and `ErrConflict` for those
+refusals, and a `*serviceinvoke.Error` or a transport error otherwise. A
+function that fails is no error: its result has `FunctionError` set.
+
 ## Differences from AWS
 
 - **Identity and function policies only.** Keys identity issued are held
@@ -685,17 +831,23 @@ curl -fsS --aws-sigv4 aws:amz:us-east-1:lambda --user test:test \
   is recorded and never assumed, and whether it exists is not checked.
 - **Duplicate tag keys are refused** with `InvalidParameterValueException`,
   and for an evaluated principal so are tag keys that differ only in case.
-- **Some condition keys are not supplied.** `aws:PrincipalOrgID` and
-  `aws:PrincipalOrgPaths` are not, so an `AddPermission` with
-  `PrincipalOrgID` grants nothing and a `Deny` with a negated operator on
-  them denies every evaluated principal. Nor are `aws:SourceArn` and
-  `aws:SourceAccount`, since no AWS service calls a function here, or the
-  Lambda keys of features the service does not have.
-- **Function policies name principals by ARN,** where AWS turns them into
-  unique IDs, so a user or role deleted and created again under the same
-  name inherits its grants. **Service principals never match**, and public
-  function policies are not blocked: Lambda's public access settings are not
-  served.
+- **Some condition keys are not supplied.** `aws:SourceArn` and
+  `aws:SourceAccount` are supplied only on the
+  [service invoke endpoint](#the-service-invoke-endpoint), since no caller
+  of the Lambda API is an AWS service, and the Lambda keys of features the
+  service does not have are not supplied at all.
+- **Some function policies name principals by ARN.** A policy is bound to
+  unique IDs only when it is saved with an identity endpoint
+  ([Function policies](#function-policies)). One stored by an earlier
+  release, or while running standalone, names its principals by ARN, and a
+  user or role deleted and created again under the same name inherits its
+  grants, until the policy is saved again with `PutResourcePolicy`; a
+  statement `AddPermission` adds is bound, and the policy's other
+  statements are not. A session whose role was deleted is denied either
+  way.
+- **Service principals match only on the service invoke endpoint**, the
+  invocations a Tule service makes as that service, and public function
+  policies are not blocked: Lambda's public access settings are not served.
 - **A function's role session is refreshed by replacing its container,**
   where Lambda's runtime keeps an execution environment's credentials valid.
   Standalone, or with `root` or `custom`, a function gets one configured key
@@ -791,6 +943,24 @@ curl -fsS --aws-sigv4 aws:amz:us-east-1:lambda --user test:test \
   trusted, since nothing is expected in front of this service and the header
   is unsigned.
 
+## Upgrading from v0.3
+
+identity v0.5.0 or later is required. The service asks identity for
+signing-key version 4, with the organization keys, and binds and shows
+function policies through its principal-ID endpoint, which identity v0.4.1
+and earlier do not serve: there, a policy write naming a user or role, and
+a read of a policy holding a unique ID, fail with `500` `ServiceException`.
+Policies stored by earlier releases are unbound: they name their principals
+by ARN and are matched by ARN, so a user or role deleted and created again
+under the same name still inherits their grants, until each is saved again
+with `PutResourcePolicy`; nothing binds them silently. Read one back with
+`GetPolicy` and put it again to bind it. A policy naming a user or role that
+does not exist is now refused with `400` `InvalidParameterValueException`,
+where it was stored before. `aws:PrincipalOrgID` and `aws:PrincipalOrgPaths`
+are now supplied, so an `AddPermission` with `PrincipalOrgID` now grants the
+organization's principals, and a condition with a negated operator on
+either key now holds only for principals outside the organization.
+
 ## Upgrading from v0.2
 
 identity v0.4.0 or later is required; identity v0.3.1 does not serve the
@@ -819,6 +989,8 @@ Standalone use is unchanged.
 ## Release and module
 
 This page follows the functions README at
-[v0.3.0](https://github.com/tulehq/functions/blob/v0.3.0/README.md), released as
-`ghcr.io/tulehq/functions:0.3.0`. Its Go module is `tule.dev/functions`, with the
+[v0.5.0](https://github.com/tulehq/functions/blob/v0.5.0/README.md), released as
+`ghcr.io/tulehq/functions:0.5.0`. Two of its "Differences from AWS" bullets,
+on condition keys and service principals, are given here as the README
+corrected them after the release. Its Go module is `tule.dev/functions`, with the
 source at [github.com/tulehq/functions](https://github.com/tulehq/functions).

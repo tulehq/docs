@@ -1,6 +1,6 @@
 ---
 title: object-store
-description: "object-store 0.7.0: a local stand-in for S3."
+description: "object-store 0.8.0: a local stand-in for S3."
 ---
 
 An S3-compatible object store that keeps objects on the local filesystem. It is
@@ -19,7 +19,7 @@ With Docker:
 docker run --rm -p 9000:9000 -v s3data:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
   -e TULE_Storage_Buckets=uploads,assets \
-  ghcr.io/tulehq/object-store:0.7.0
+  ghcr.io/tulehq/object-store:0.8.0
 ```
 
 The image is based on Alpine, so `docker exec -it <container> sh` gives you a
@@ -50,7 +50,7 @@ Settings come from environment variables prefixed with `TULE_`, and from a
 | `TULE_Auth_AccessKeyID` | required | The access key clients sign requests with |
 | `TULE_Auth_SecretAccessKey` | required | Its secret |
 | `TULE_Auth_AccountID` | `000000000000` | The account the configured key and the buckets belong to: identity's management account (`TULE_Identity_AccountID`), 12 digits. Principals of other accounts need a bucket policy granting them ([below](#cross-account-access)) |
-| `TULE_Auth_IdentityEndpoint` | unset | The [identity](/identity/) service's base URL, such as `http://localhost:9030`, to also accept the keys it issues and enforce their IAM policies and bucket policies ([below](#permissions)). Must be an absolute `http` or `https` URL; needs identity v0.4.0 or later |
+| `TULE_Auth_IdentityEndpoint` | unset | The [identity](/identity/) service's base URL, such as `http://localhost:9030`, to also accept the keys it issues and enforce their IAM policies and bucket policies ([below](#permissions)). Must be an absolute `http` or `https` URL; needs identity v0.5.0 or later |
 | `TULE_GasEnv` | | `development` logs at trace level, `testing` disables logging |
 
 The server refuses to start without credentials, and every request must be
@@ -74,7 +74,9 @@ or as a valid one.
 
 Without `TULE_Auth_IdentityEndpoint` nothing is evaluated: the configured key
 is the account's root and may do everything. Bucket policies can still be
-set and read, but no request is evaluated against them.
+set and read, but no request is evaluated against them, and they are stored
+and returned as sent, their principals unbound (see
+[Bucket policies](#bucket-policies)).
 
 With it, every request signed with a key identity issued, an IAM user's
 access key or a role session's credentials, is evaluated against that
@@ -172,15 +174,17 @@ DeleteBucketPolicy take S3's request and response shapes, and each takes
 
 - **PutBucketPolicy** takes the document as the body and answers `204 No
   Content`. It is evaluated before the body is read, and the policy is
-  validated before the bucket is looked up. It refuses with `400
-  MalformedPolicy` a policy over 20 KB, one that is not a valid
-  resource-based policy (with tule.dev/policy's message, such as `Invalid
-  principal in policy`), a `Resource` that is not the bucket or an object in
-  it ("Policy has invalid resource"), and an `Action` that is not `"*"` or an
-  `s3:` action ("Policy has invalid action"); an empty body is `400
+  validated, and its principals bound, before the bucket is looked up. It
+  refuses with `400 MalformedPolicy` a policy over 20 KB, one that is not a
+  valid resource-based policy (with tule.dev/policy's message, such as
+  `Invalid principal in policy`), a `Resource` that is not the bucket or an
+  object in it ("Policy has invalid resource"), an `Action` that is not
+  `"*"` or an `s3:` action ("Policy has invalid action"), and an IAM user or
+  role ARN that no user or role has ("Invalid principal in policy"; see
+  [Unique-ID principals](#unique-id-principals)); an empty body is `400
   MissingRequestBodyError`.
-- **GetBucketPolicy** answers `200` with the document exactly as stored, or
-  `404 NoSuchBucketPolicy`.
+- **GetBucketPolicy** answers `200` with the document as stored, its
+  principals shown as S3 shows them (below), or `404 NoSuchBucketPolicy`.
 - **DeleteBucketPolicy** answers `204 No Content`, also when the bucket had
   no policy.
 
@@ -188,6 +192,34 @@ They are evaluated as `s3:PutBucketPolicy`, `s3:GetBucketPolicy` and
 `s3:DeleteBucketPolicy` on the bucket. The configured root key is never
 evaluated, so it can always change a policy that denies everyone else.
 Deleting a bucket deletes its policy, and a new bucket has none.
+
+#### Unique-ID principals
+
+With `TULE_Auth_IdentityEndpoint` set, a bucket policy's principals are
+bound to unique IDs, as AWS binds them. PutBucketPolicy asks identity's
+[principal-ID endpoint](/identity/#the-principal-id-endpoint) (identity
+v0.5.0) for the unique ID (`AIDA...` or `AROA...`) of each user and role ARN
+in the `AWS` values of `Principal` and `NotPrincipal`, and stores the policy
+with the IDs in their place. Accounts, root ARNs, `*`, session ARNs, service
+principals and ARNs in conditions, such as `aws:PrincipalArn`, are kept as
+written, as AWS keeps them. The document is otherwise kept as sent.
+
+- Requests are evaluated against the stored, bound policy, which matches a
+  user or a role session by its unique ID (`aws:userid`). A user or role
+  deleted and created again under the same name has a new ID, so it is not
+  granted, or denied, what the policy names the old one for.
+- GetBucketPolicy shows each ID that a user or role still has as its
+  current ARN, and an ID no user or role has any more as the ID, as AWS
+  shows it.
+- An ARN no user or role has is refused, `400 MalformedPolicy`, "Invalid
+  principal in policy", and nothing is stored. A policy that is over 20 KB
+  once bound is refused as one sent over 20 KB is.
+- When identity cannot be asked, PutBucketPolicy fails with `500
+  InternalError` and stores nothing, and GetBucketPolicy fails with `500
+  InternalError`; both are logged.
+
+Standalone, without an identity endpoint, there are no users or roles to
+bind: policies are stored and returned as sent, and matched by ARN.
 
 ### Actions and resources
 
@@ -223,8 +255,22 @@ The global condition keys supplied are `aws:SourceIp` (the TCP peer),
 identity reports them: `aws:PrincipalArn` (a user's ARN with its path, a
 session's role's ARN with the role's path), `aws:userid`,
 `aws:PrincipalType`, `aws:PrincipalAccount`, for IAM users `aws:username`,
-and `aws:PrincipalTag/<key>` for each tag of a user or of a session's role.
-They fill policy variables too. S3 keys such as `s3:prefix`,
+`aws:PrincipalTag/<key>` for each tag of a user or of a session's role, and
+`aws:PrincipalOrgID` and `aws:PrincipalOrgPaths`. They fill policy variables
+too.
+
+`aws:PrincipalOrgID` (the organization's ID, `o-...`) and
+`aws:PrincipalOrgPaths` (one path, `o-.../r-.../ou-.../`, down to the
+account's parent) are supplied as identity reports them: for a principal
+whose account is an `ACTIVE` member of the organization, or its management
+account, and left out otherwise. Identity keeps them for 30 seconds, so an
+account moved, removed or closed keeps its old keys for up to that long.
+When identity could not ask the accounts service, both are evaluated as
+unknown, never as absent: a condition on them never helps an `Allow` apply
+and always lets a `Deny` apply. A request whose policies do not test them
+is decided as usual.
+
+S3 keys such as `s3:prefix`,
 `s3:x-amz-acl`, `s3:x-amz-copy-source`, `s3:if-none-match`, `s3:authType`,
 `s3:signatureversion` and `s3:ResourceAccount` are supplied for the actions the reference lists
 them for, when the request carries a value; the README lists them all. A
@@ -232,26 +278,44 @@ value over 4096 bytes is refused with `400 InvalidArgument`.
 
 The gaps, as the README lists them:
 
-- Bucket policies match principals by ARN, where AWS converts a stored ARN
-  to the principal's unique ID, so a user or role deleted and created again
-  under the same name inherits its grants. A session whose role was deleted
-  is refused.
-- `aws:PrincipalOrgID` and `aws:PrincipalOrgPaths` are not supplied, so a
-  `Deny` with a negated operator on them, such as one refusing principals
-  outside the organization, denies every evaluated principal.
+- Bucket policies stored by v0.7.0 and earlier are unbound: they keep
+  matching their principals by ARN, so a user or role deleted and created
+  again under the same name inherits their grants, until each policy is
+  saved again with PutBucketPolicy, which binds it. A standalone server
+  never binds.
+- A session whose role was deleted is refused.
 - Service, `CanonicalUser` and federated principals are accepted in a
   bucket policy but match no caller.
 - There is no Block Public Access and no GetBucketPolicyStatus, and ACLs
   are not supported.
 - On S3 a bucket policy `Deny` also applies to the bucket owner's root user;
   here that root is never evaluated.
-- PutBucketPolicy does not check that a named user or role exists.
+- PutBucketPolicy does not check that each action applies to the resources
+  its statement names. Standalone, it does not check that a named user or
+  role exists.
 - `aws:ResourceTag/*`, `s3:signatureAge`, `s3:TlsVersion` and the other S3
   keys not listed are not supplied.
 - ACL, tagging and object lock headers on a write are ignored, so such a
   write needs only `s3:PutObject`.
 - Access point policies, permissions boundaries, session policies, SCPs and
   RCPs are not evaluated.
+
+### Changes in v0.8.0
+
+- **Breaking:** `TULE_Auth_IdentityEndpoint` needs identity v0.5.0 or later,
+  whose signing-key endpoint reports the organization keys and which serves
+  the principal-ID endpoint; an older identity fails every request it
+  verifies with `500`.
+- With an identity endpoint, PutBucketPolicy binds user and role ARNs to
+  unique IDs and refuses one no user or role has; GetBucketPolicy shows them
+  back as ARNs, or as IDs for principals that are gone; and either fails
+  with `500` when identity cannot be asked
+  ([Unique-ID principals](#unique-id-principals)).
+- `aws:PrincipalOrgID` and `aws:PrincipalOrgPaths` are supplied. A negated
+  condition on them, which held for every principal when they were not
+  supplied, now holds only outside the organization.
+- **Upgrade:** policies stored by v0.7.0 and earlier stay unbound and match
+  by ARN until saved again; save each one again to bind it.
 
 ### Changes in v0.7.0
 
@@ -347,7 +411,7 @@ any origin, and response headers such as `ETag` are exposed.
     ghcr.io/tulehq/object-store:0.3.1
   docker run -d --name new -p 9001:9000 -v s3data-new:/data \
     -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
-    ghcr.io/tulehq/object-store:0.7.0
+    ghcr.io/tulehq/object-store:0.8.0
   export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1
   for b in $(aws s3 ls --endpoint-url http://localhost:9000 | awk '{print $3}'); do
     aws s3 sync "s3://$b" "copy/$b" --endpoint-url http://localhost:9000
@@ -408,6 +472,6 @@ any origin, and response headers such as `ETag` are exposed.
 ## Release and module
 
 This page follows the object-store README at
-[v0.7.0](https://github.com/tulehq/object-store/blob/v0.7.0/README.md), released as
-`ghcr.io/tulehq/object-store:0.7.0`. Its Go module is `tule.dev/object-store`, with the
+[v0.8.0](https://github.com/tulehq/object-store/blob/v0.8.0/README.md), released as
+`ghcr.io/tulehq/object-store:0.8.0`. Its Go module is `tule.dev/object-store`, with the
 source at [github.com/tulehq/object-store](https://github.com/tulehq/object-store).

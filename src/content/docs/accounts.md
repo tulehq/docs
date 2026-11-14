@@ -1,6 +1,6 @@
 ---
 title: accounts
-description: "accounts 0.4.0: a local stand-in for Organizations."
+description: "accounts 0.5.0: a local stand-in for Organizations."
 ---
 
 An AWS Organizations-compatible account service that keeps an organization in
@@ -21,7 +21,7 @@ With Docker:
 ```sh
 docker run --rm -p 9020:9020 -v accountsdata:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
-  ghcr.io/tulehq/accounts:0.4.0
+  ghcr.io/tulehq/accounts:0.5.0
 ```
 
 The image is based on Alpine, so `docker exec -it <container> sh` gives you a
@@ -77,10 +77,10 @@ a key identity deactivates or deletes is refused on the next one. A request
 signed with the configured key never asks identity. When identity cannot be
 asked, fails, or gives no answer within 10 seconds, a request signed with
 another key fails with `500` `ServiceException`, never as an unknown key,
-and the configured key keeps working. The endpoint must be identity v0.4.0
-or later, which reports the principal's role path, unique ID and tags; an
-older identity fails every request signed with a key it issued as
-`ServiceException`.
+and the configured key keeps working. The endpoint must be identity v0.5.0
+or later, which reports the principal's role path, unique ID, tags and
+organization keys; an older identity fails every request signed with a key
+it issued as `ServiceException`.
 
 ## Permissions
 
@@ -151,15 +151,31 @@ for the key `aws:PrincipalAccount`, `aws:PrincipalArn` (a role session's is
 its role's ARN with the path, such as
 `arn:aws:iam::<account>:role/audit/auditor`), `aws:userid`,
 `aws:PrincipalType`, `aws:PrincipalTag/<key>` (an IAM user's or a session's
-role's tags) and, for an IAM user, `aws:username`; `aws:ResourceTag/<key>` from each evaluated resource's tags;
+role's tags), `aws:PrincipalOrgID` and `aws:PrincipalOrgPaths` and, for an
+IAM user, `aws:username`; `aws:ResourceTag/<key>` from each evaluated resource's tags;
 and `aws:RequestTag/<key>` and `aws:TagKeys` from the tags of
 `CreateAccount`, `CreateOrganizationalUnit`, `TagResource` and
 `UntagResource`.
 
+`aws:PrincipalOrgID` and `aws:PrincipalOrgPaths` are supplied as identity
+reports them: for a principal whose account is the management account or an
+`ACTIVE` member, the organization's ID and the account's one path, such as
+`o-a1b2c3d4e5/r-ab12/ou-ab12-11111111/`, and neither for any other. Identity
+learns them from this service and keeps an account's for 30 seconds, so a
+move, a removal or a deleted organization reaches conditions up to 30
+seconds late. When identity could not ask this service, both keys are
+evaluated as unknown, with tule.dev/policy's unknown keys, never as absent:
+a condition on either never holds in an `Allow` and always holds in a
+`Deny`, whatever its operator, so `StringNotEquals` on `aws:PrincipalOrgID`
+grants nothing and a `Deny` on it applies. A request whose policies do not
+test them is decided as usual.
+
+Identity asks this service with the root user's key, which this service
+checks first and never evaluates, so its own lookups need neither identity
+nor the organization keys.
+
 The known gaps, as the README lists them: tags in one request whose keys
-differ only by case are refused for an evaluated principal;
-`aws:PrincipalOrgID` and `aws:PrincipalOrgPaths` are not supplied, so a
-Deny with a negated operator on them denies every evaluated principal; and
+differ only by case are refused for an evaluated principal; and
 service control policies, permissions boundaries and session policies are
 not evaluated, and resource-based policies are not served.
 
@@ -352,6 +368,6 @@ paginators work.
 ## Release and module
 
 This page follows the accounts README at
-[v0.4.0](https://github.com/tulehq/accounts/blob/v0.4.0/README.md), released as
-`ghcr.io/tulehq/accounts:0.4.0`. Its Go module is `tule.dev/accounts`, with the
+[v0.5.0](https://github.com/tulehq/accounts/blob/v0.5.0/README.md), released as
+`ghcr.io/tulehq/accounts:0.5.0`. Its Go module is `tule.dev/accounts`, with the
 source at [github.com/tulehq/accounts](https://github.com/tulehq/accounts).

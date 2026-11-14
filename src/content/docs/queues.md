@@ -1,6 +1,6 @@
 ---
 title: queues
-description: "queues 0.3.0: a local stand-in for SQS."
+description: "queues 0.5.0: a local stand-in for SQS."
 ---
 
 An Amazon SQS-compatible queue service that keeps its queues in a local
@@ -23,7 +23,7 @@ With Docker:
 ```sh
 docker run --rm -p 9050:9050 -v queuesdata:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
-  ghcr.io/tulehq/queues:0.3.0
+  ghcr.io/tulehq/queues:0.5.0
 ```
 
 The image is based on Alpine, so `docker exec -it <container> sh` gives you a
@@ -110,9 +110,10 @@ attribute, together, with [tule.dev/policy](/policy/)'s `Authorize`:
   policy. The
   [cross-account walkthrough](/guides/identity/#cross-account-access) shows
   the pattern with a secret or a bucket.
-- `AddPermission`, `CreateQueue`, `DeleteQueue`, `ListQueues`,
-  `ListQueueTags`, `RemovePermission`, `SetQueueAttributes`, `TagQueue` and
-  `UntagQueue` are never shared across accounts, as SQS documents: a queue
+- `AddPermission`, `CancelMessageMoveTask`, `CreateQueue`, `DeleteQueue`,
+  `ListMessageMoveTasks`, `ListQueues`, `ListQueueTags`, `RemovePermission`,
+  `SetQueueAttributes`, `StartMessageMoveTask`, `TagQueue` and `UntagQueue`
+  are never shared across accounts, as SQS documents: a queue
   policy `Allow` is not enough for another account's principal on them,
   though a `Deny` in it still denies.
 
@@ -145,6 +146,39 @@ request with `500` `InternalFailure`. `aws:PrincipalArn` for a role session
 carries the role's path, and `aws:userid` and `aws:PrincipalTag/<key>` are
 supplied.
 
+**Changes in v0.4.0.** `aws:PrincipalOrgID` and `aws:PrincipalOrgPaths` are
+supplied, so a condition on them now holds as in AWS, and a negated
+condition, which held for every principal before, now holds only for
+principals outside the organization: a `Deny` such as "deny anyone outside
+my organization" no longer denies members. When identity could not ask the
+accounts service about a principal's account, both keys are passed to
+tule.dev/policy as unknown, never as absent, so the request is decided as
+the worst case for the caller. With an identity endpoint, a queue policy's
+IAM user and role ARNs are bound to the principals' unique IDs when it is
+stored, and shown as ARNs again when it is read
+([Queue policies](#queue-policies)): a user or role deleted and created
+again under the same ARN is no longer granted what the deleted one was, and
+a `Policy` naming a user or role that does not exist is refused with
+`InvalidAttributeValue`, where v0.3.0 stored it. **Policies stored by
+earlier releases are not bound**, and keep matching by ARN until the
+`Policy` is set again with `SetQueueAttributes` (or `CreateQueue`), which
+binds the whole document; `AddPermission` binds only the statement it adds
+and `RemovePermission` binds nothing. Nothing is bound on its own at
+upgrade: to bind every policy, read each queue's `Policy` and set it again.
+identity v0.5.0 or later is needed, for signing-key version 4 and the
+principal-ID endpoint; an older identity fails every evaluated request with
+`500` `InternalFailure`, and every write or read of a policy naming a user
+or role.
+
+**Changes in v0.5.0.** The message move task operations are served
+([Message move tasks](#message-move-tasks)). Starting one needs, besides
+`sqs:StartMessageMoveTask`, `sqs:ReceiveMessage`, `sqs:DeleteMessage` and
+`sqs:GetQueueAttributes` on the source and `sqs:SendMessage` on every queue
+it moves messages to. A message moved to a FIFO dead-letter queue takes its
+own message ID as its deduplication ID, as SQS replaces it, where v0.4.0
+kept the one it was sent with. Messages already in a dead-letter queue keep
+theirs.
+
 Each operation is evaluated as the action and resource the SQS Service
 Authorization Reference gives it:
 
@@ -155,10 +189,17 @@ Authorization Reference gives it:
 | `SendMessage`, `SendMessageBatch` | `sqs:SendMessage` | the queue |
 | `DeleteMessage`, `DeleteMessageBatch` | `sqs:DeleteMessage` | the queue |
 | `ChangeMessageVisibility`, `ChangeMessageVisibilityBatch` | `sqs:ChangeMessageVisibility` | the queue |
+| `StartMessageMoveTask` | `sqs:StartMessageMoveTask`, `sqs:ReceiveMessage`, `sqs:DeleteMessage` and `sqs:GetQueueAttributes` | the source queue |
+| | `sqs:SendMessage` | the destination, or without one each queue the messages it would move came from |
+| `CancelMessageMoveTask` | `sqs:CancelMessageMoveTask`, `sqs:ReceiveMessage`, `sqs:DeleteMessage` and `sqs:GetQueueAttributes` | the source queue its `TaskHandle` names |
+| `ListMessageMoveTasks` | `sqs:ListMessageMoveTasks` and `sqs:GetQueueAttributes` | the source queue |
 | Every other operation | `sqs:<Operation>` | the queue |
 
 A queue is `arn:aws:sqs:<region>:<account>:<name>`, in the configured
-account and region. A batch is allowed or denied whole.
+account and region. A batch is allowed or denied whole. The message move
+task operations are authorized with the minimum permissions the developer
+guide gives for dead-letter queue redrive; each queue is evaluated with its
+own tags and `Policy`.
 
 The condition keys supplied are the global `aws:SourceIp`,
 `aws:CurrentTime`, `aws:EpochTime`, `aws:SecureTransport`,
@@ -166,7 +207,11 @@ The condition keys supplied are the global `aws:SourceIp`,
 `aws:PrincipalArn` (for a role session its role's ARN with the role's
 path), `aws:userid`, `aws:PrincipalType`, `aws:username` for an IAM user,
 `aws:PrincipalTag/<key>` for each of an IAM user's or a session's role's
-tags, `aws:ResourceTag/<key>` from the queue's tags, and `aws:RequestTag/<key>`
+tags, `aws:PrincipalOrgID` and `aws:PrincipalOrgPaths` for a principal whose
+account is in the organization the accounts service reports, or is its
+management account (left out otherwise, as AWS leaves them out; identity
+keeps them for up to 30 seconds, so an account moved or removed keeps its
+old keys that long), `aws:ResourceTag/<key>` from the queue's tags, and `aws:RequestTag/<key>`
 and `aws:TagKeys` for `CreateQueue`, `TagQueue` and `UntagQueue`. For an
 evaluated key, more than 50 tags or tag keys, and tag keys that differ only
 by case, fail with `InvalidParameterValue` before evaluation. A queue's
@@ -185,12 +230,12 @@ Gaps:
 
 - **Permissions boundaries, session policies, SCPs and RCPs** are not
   evaluated, so a queue policy's grant to a role is unlimited by them.
-- **Stored principals are matched by ARN,** where AWS turns them into
-  unique IDs, so a user or role deleted and created again under the same
-  name inherits its grants. A session whose role was deleted is refused
-  everything.
-- **`aws:PrincipalOrgID` and `aws:PrincipalOrgPaths` are not supplied,** so
-  a `Deny` with a negated operator on them denies every evaluated principal.
+- **Standalone, stored principals are matched by ARN.** Without an
+  identity endpoint a policy is stored as sent, and a user or role deleted
+  and created again under the same ARN would inherit its grant (no key but
+  the root key is accepted then, so nothing is evaluated). Policies stored
+  by earlier releases are matched by ARN until they are written again. A
+  session whose role was deleted is refused everything.
 - **Service principals never match,** so a statement naming
   `sqs.amazonaws.com` or `sns.amazonaws.com` grants nothing.
 - **Event source mappings poll with the credentials functions supplies.**
@@ -204,9 +249,42 @@ Gaps:
 A queue's policy is its `Policy` attribute, set with `CreateQueue` and
 `SetQueueAttributes`, read with `GetQueueAttributes`, and written one
 statement at a time by `AddPermission` and `RemovePermission`. A `Policy`
-set directly is returned as it was sent; one `AddPermission` or
+set directly is returned as it was sent, except for its principals, which
+with an identity endpoint are shown as below; one `AddPermission` or
 `RemovePermission` changed is written again as compact JSON with
 `Statement` always an array.
+
+**Principals are bound to unique IDs.** As AWS does when a policy is saved,
+with an identity endpoint queues turns each IAM user and role ARN in the
+`AWS` values of a `Principal` or `NotPrincipal` into the unique ID
+(`AIDA...`, `AROA...`) of the user or role that has it now, through
+identity's principal-ID endpoint (`tule.dev/identity/principals`):
+
+- `CreateQueue` and `SetQueueAttributes` with a `Policy` bind the whole
+  document they store. Account IDs, root ARNs (all `AddPermission`
+  generates), session ARNs, `*`, unique IDs and ARNs in conditions, such as
+  `aws:PrincipalArn`, are kept.
+- `AddPermission` binds the statement it generates, alone, and keeps the
+  stored statements as they are; `RemovePermission` binds nothing, so a
+  revocation is never refused for a stale principal in another statement,
+  and never waits on identity.
+- An ARN no user or role has is refused, as SQS refuses it, with
+  `InvalidAttributeValue`, "Invalid value for the parameter Policy. Reason:
+  Invalid principal in policy: <ARN>".
+- Every read, `GetQueueAttributes` and the
+  [inspection API](#inspection-api), shows each unique ID that a user or
+  role still has as its current ARN, and leaves one that no user or role
+  has as the ID.
+- Evaluation uses the stored, bound policy, and asks identity nothing.
+- Identity failing or unreachable fails the write, which stores nothing,
+  and the read, with `500` `InternalFailure`. A policy that names no user or
+  role needs no call.
+- `CreateQueue` for a queue that exists compares the bound `Policy`, so
+  the same request after a principal it names was created again, or
+  against a policy an earlier release stored unbound, is
+  `QueueNameExists`.
+
+Standalone, a policy is stored and shown as sent, and matched by ARN.
 
 `CreateQueue` and `SetQueueAttributes` refuse with `InvalidAttributeValue`
 a `Policy` over SQS's quotas (8,192 bytes, 20 statements, 7 actions in a
@@ -214,9 +292,10 @@ statement, 50 principals or 10 conditions) or one that is not a
 resource-based policy tule.dev/policy's `ParseResource` accepts (each
 statement needs a `Principal` or `NotPrincipal` and a `Resource` or
 `NotResource`; groups, partial wildcards and `Federated` principals are
-refused). A principal ARN that names no existing IAM entity is stored and
-matches nobody until it exists, and a statement's `Resource` need not name
-the queue.
+refused). With an identity endpoint, a principal ARN that names no existing
+user or role is refused too (above); standalone, such a policy is stored and
+matches nobody until a principal of that ARN exists. A statement's
+`Resource` need not name the queue.
 
 `AddPermission` appends an `Allow` statement whose `Sid` is the label,
 whose `Principal` is `arn:aws:iam::<id>:root` for each of `AWSAccountIds`,
@@ -334,6 +413,9 @@ one-item forms without an index that the API reference's examples show
 | `ReceiveMessage` | `MaxNumberOfMessages`, `VisibilityTimeout`, `WaitTimeSeconds` long polling, `MessageAttributeNames` (`All`, `.*`, `prefix.*`), `MessageSystemAttributeNames` and the deprecated `AttributeNames`, `ReceiveRequestAttemptId` on FIFO queues |
 | `DeleteMessage` / `DeleteMessageBatch` | |
 | `ChangeMessageVisibility` / `ChangeMessageVisibilityBatch` | |
+| `StartMessageMoveTask` | Moves a dead-letter queue's messages to `DestinationArn`, or back to the queues they came from, in the background, at up to `MaxNumberOfMessagesPerSecond` (1 to 500) ([Message move tasks](#message-move-tasks)) |
+| `ListMessageMoveTasks` | The source queue's most recent tasks, `MaxResults` 1 to 10, default 1 |
+| `CancelMessageMoveTask` | Cancels a `RUNNING` task; what it moved stays moved |
 
 The queue attributes are SQS's: `DelaySeconds` (0 to 900, default 0),
 `MaximumMessageSize` (1024 to 1048576, default 1048576),
@@ -379,7 +461,8 @@ number of groups only. A standard receive reads only the messages it
 takes. Neither grows with the rest of the queue.
 
 A long poll returns as soon as it has one message. It waits on a signal
-that a send, a visibility change, a delete or a dead-letter move raises,
+that a send, a visibility change, a delete, a dead-letter move or a
+message move task raises,
 and on a timer for the next delayed or in-flight message, not by polling
 the store.
 
@@ -393,10 +476,105 @@ in order within a group, and a group is held while any of its messages is
 in flight. Each stored message gets the next `SequenceNumber`.
 
 A message whose receive count has reached its queue's `maxReceiveCount` is
-moved to the dead-letter queue instead of being received again. The
-dead-letter queue must exist, be of the same type, not be the queue
-itself, and allow the queue in its `RedriveAllowPolicy`, else the
-`RedrivePolicy` fails with `InvalidParameterValue`.
+moved to the dead-letter queue instead of being received again. A FIFO
+message's deduplication ID there is its `MessageId`, as the developer
+guide's "Learn how to configure a dead-letter queue redrive in Amazon SQS"
+notes ("the original message's deduplication ID will be replaced with the
+original message's ID"), so two messages that shared a deduplication ID
+stay apart, and a receive from the dead-letter queue reports the
+`MessageId` as `MessageDeduplicationId`. The dead-letter queue must
+exist, be of the same type, not be the queue itself, and allow the queue
+in its `RedriveAllowPolicy`, else the `RedrivePolicy` fails with
+`InvalidParameterValue`.
+
+### Message move tasks
+
+A message move task moves a dead-letter queue's messages out of it, as the
+developer guide's "Learn how to configure a dead-letter queue redrive in
+Amazon SQS" describes. `StartMessageMoveTask`'s `SourceArn` must name a
+queue that another queue's `RedrivePolicy` names as its dead-letter queue
+("only ARNs of dead-letter queues (DLQs) whose sources are other Amazon SQS
+queues are accepted", API reference), else it fails with
+`UnsupportedOperation`. With a `DestinationArn`, every message goes there;
+the destination must be of the source's type ("if both queues are the same
+type", developer guide) and not be the source, else
+`InvalidParameterValue`. Without one, or with it blank, each message goes
+back to the queue its `DeadLetterQueueSourceArn` names, the queue a receive
+moved it from ("If this field is left blank, the messages will be redriven
+back to their respective original source queues"). A source or destination
+that does not exist fails with `ResourceNotFoundException`, the error the
+API reference lists for "One or more specified resources don't exist". A
+source with a task `RUNNING` or `CANCELLING` fails with
+`UnsupportedOperation`: "Only one active message movement task is supported
+per queue at any given time".
+
+The task runs in the background, in the server. It moves the visible
+messages the source holds when it starts, oldest first ("Dead-letter
+queues redrive messages in the order they are received, starting with the
+oldest message"), up to 10 in each transaction, so a task never holds the
+store's one connection for long. `MaxNumberOfMessagesPerSecond` paces it:
+after each step it waits until the messages it moved fit the rate, so it
+never moves more than that many in a second. Without one, the API
+reference's "system will optimize the rate", it moves as fast as the store
+takes the steps, without pausing. A moved message arrives as a new one, as
+the developer guide describes ("All redriven messages are considered new
+messages with a new `messageID` and `enqueueTime`"; "The redrive task
+resets the retention period"): a new `MessageId`, visible at once, never
+received, with no `DeadLetterQueueSourceArn`. Its body, attributes,
+`SenderId` and `SentTimestamp` are kept; on a FIFO destination it keeps its
+`MessageGroupId` and `MessageDeduplicationId` and takes the destination's
+next `SequenceNumber`. Long polls on the destination wake as the messages
+arrive. On a FIFO source the task keeps each group's order, holding a group
+as a receive does: while any of the group's messages is in flight, and
+behind a message of the group that is not visible, it moves none of the
+group's messages, and moves the other groups. It comes back to a held
+group every 250 milliseconds, and moves it once its message in flight is
+deleted or visible again. A step reads the source in queue order and
+stops once it has its messages. When it reads four times as many visible
+messages as the source has groups, and at least 256, without finding
+them, as behind a long backlog of a held group, it walks the source's
+groups instead, as a FIFO receive does: a seek per group and a read of
+each group's messages that are not visible. The task counts the groups
+once, at its first step. A message read costs about a quarter of a group
+walked, so a step costs a small multiple of the cheaper of reading the
+backlog and walking the groups. The task is `COMPLETED` once none of the
+messages it started on is left visible in the source, a held group's
+included.
+
+`ListMessageMoveTasks` returns up to `MaxResults` of the source's most
+recent tasks ("The default is 1, which provides the most recent message
+movement task. The upper limit is 10"). `ApproximateNumberOfMessagesToMove`
+is the source's visible messages when the task started ("obtained at the
+time of starting the message movement task"), and
+`ApproximateNumberOfMessagesMoved` is exact. As
+`ListMessageMoveTasksResultEntry` documents, `TaskHandle` is listed only
+while the task is `RUNNING`, `DestinationArn` and
+`MaxNumberOfMessagesPerSecond` only when the start gave them, and
+`FailureReason` only for a `FAILED` task. `StartedTimestamp` is epoch
+milliseconds, as the API reference's example shows. A `TaskHandle` is
+base64 of a JSON object holding the task's ID and its source's ARN, the
+form the example's handle decodes to; it is opaque to clients.
+
+`CancelMessageMoveTask` cancels a `RUNNING` task and returns how many
+messages it has moved. The task is `CANCELLING` until it stops between two
+steps, which the cancel wakes it for, and then `CANCELLED`; the messages it
+moved stay in the destination ("Cancelling a message movement task does
+not revert the messages that have already been moved"). A task that is not
+`RUNNING` fails with `UnsupportedOperation`, and a handle that names no
+task with `ResourceNotFoundException`.
+
+A task fails, `FAILED` with a `FailureReason`, on a message it cannot move:
+one with no source queue to go back to (sent to the dead-letter queue
+directly, not moved there by a `RedrivePolicy`) when the start gave no
+`DestinationArn`, or one whose destination no longer exists. The messages
+it moved before stay moved, and the one it stopped on and those after it
+stay in the source.
+
+The tasks stop when the server shuts down; nothing resumes them. When the
+server starts again, a task it left `RUNNING` is reported `FAILED` with the
+`FailureReason` "The server stopped while the task was running.", and one
+it left `CANCELLING` is `CANCELLED`. The messages it had not moved are still
+in the source, for a new task. A queue's tasks are deleted with it.
 
 ## Inspection API
 
@@ -496,10 +674,13 @@ curl -fsS --aws-sigv4 aws:amz:us-east-1:sqs --user test:test \
   as SQS's errors: a name deleted less than 60 seconds ago fails
   `CreateQueue` with `QueueDeletedRecently`, and a second purge within 60
   seconds fails with `PurgeQueueInProgress`.
-- **Message move tasks are not served.** `StartMessageMoveTask`,
-  `CancelMessageMoveTask`, `ListMessageMoveTasks`, and any other operation
-  not listed above, answer as an action SQS does not know: `400`
-  `InvalidAction`, over either protocol.
+- **An operation not listed above** answers as an action SQS does not
+  know: `400` `InvalidAction`, over either protocol.
+- **Message move task quotas are not enforced.** A task may run longer
+  than the 36 hours SQS allows, and an account may have more than the 100
+  active tasks SQS allows (developer guide, dead-letter queue redrive).
+  Tasks run in the server, not beside it: they stop with it (see
+  [Message move tasks](#message-move-tasks)).
 - **Choices where AWS documents none.**
   - Receipt handles are opaque base64 and name one receive. A
     `DeleteMessage` with an earlier receive's handle succeeds and deletes
@@ -544,13 +725,47 @@ curl -fsS --aws-sigv4 aws:amz:us-east-1:sqs --user test:test \
     accepted and not stored. AWS documents nothing either way for a purge.
     The inspection API's `DELETE /_queues/messages` clears them.
   - `SenderId` is the access key ID that signed the send.
+  - The message move task refusals AWS does not assign a code: a source
+    that is no dead-letter queue, a source with an active task, and a
+    cancel of a task that is not `RUNNING` fail with
+    `UnsupportedOperation`, which the three operations list; a destination
+    of the other queue type, or the source itself, with
+    `InvalidParameterValue`. A `SourceArn` or `DestinationArn` that is no
+    SQS ARN fails with `InvalidParameterValue`; an SQS ARN of another
+    account or region, and a `TaskHandle` that names no task, fail with
+    `ResourceNotFoundException`, before the request is evaluated, as a
+    queue URL of another account fails with `QueueDoesNotExist`.
+  - A message move task moves only the messages its source held when it
+    started, and of those only the ones visible as it reaches them: on a
+    standard source, a message in flight or delayed when the task gets to
+    it is left. On a FIFO source, the task waits for a group held by a
+    message in flight rather than leave the group's visible messages
+    behind; AWS documents only that redrive moves messages "starting with
+    the oldest message". Moved
+    messages are not delayed by the destination's `DelaySeconds`, and a
+    FIFO destination neither deduplicates them nor records their
+    deduplication IDs. A message a `RedrivePolicy` moved to a FIFO
+    dead-letter queue keeps the `MessageDeduplicationId` it has there,
+    its original `MessageId`.
+  - A message move task without a `DestinationArn` fails on the first
+    message with no `DeadLetterQueueSourceArn`, rather than skipping it.
+  - A task started without a `DestinationArn` is authorized for
+    `sqs:SendMessage` on each queue the messages it will move came from,
+    read when it starts; AWS sends them as the service itself
+    ("Configuring queue permissions for dead-letter queue redrive" asks
+    the caller for `sqs:SendMessage` on the destination queue).
+  - `ListMessageMoveTasks` lists the tasks oldest first, as the API
+    reference's example does. Its Query result names each task
+    `ListMessageMoveTasksResultEntry`, the SDK model's flattened `xmlName`;
+    the API reference's example shows `Result`.
   - Missing parameters fail with `MissingParameter`, a malformed JSON body
     with `SerializationException`, and a malformed form with
     `MalformedQueryString`.
 - **Error statuses are the SDK model's.** Each SQS error is answered with
   the status its `httpError` and `awsQueryError` traits give in the SDK
   model (`aws-sdk-go-v2/service/sqs` `schemas/schemas.go`): `404` for
-  `ReceiptHandleIsInvalid` and `InvalidAddress`, `403` for
+  `ReceiptHandleIsInvalid`, `InvalidAddress` and
+  `ResourceNotFoundException`, `403` for
   `PurgeQueueInProgress` and `OverLimit` (sent for an `AddPermission` of
   more than seven actions), `400` for the rest. The API
   reference lists `400` for every per-action error. The common errors take
@@ -599,6 +814,6 @@ curl -fsS --aws-sigv4 aws:amz:us-east-1:sqs --user test:test \
 ## Release and module
 
 This page follows the queues README at
-[v0.3.0](https://github.com/tulehq/queues/blob/v0.3.0/README.md), released as
-`ghcr.io/tulehq/queues:0.3.0`. Its Go module is `tule.dev/queues`, with the
+[v0.5.0](https://github.com/tulehq/queues/blob/v0.5.0/README.md), released as
+`ghcr.io/tulehq/queues:0.5.0`. Its Go module is `tule.dev/queues`, with the
 source at [github.com/tulehq/queues](https://github.com/tulehq/queues).
