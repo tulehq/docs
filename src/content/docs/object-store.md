@@ -1,6 +1,6 @@
 ---
 title: object-store
-description: "object-store 0.9.0: a local stand-in for S3."
+description: "object-store 0.10.1: a local stand-in for S3."
 ---
 
 An S3-compatible object store that keeps objects on the local filesystem. It is
@@ -19,7 +19,7 @@ With Docker:
 docker run --rm -p 9000:9000 -v s3data:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
   -e TULE_Storage_Buckets=uploads,assets \
-  ghcr.io/tulehq/object-store:0.9.0
+  ghcr.io/tulehq/object-store:0.10.1
 ```
 
 The image is based on Alpine, so `docker exec -it <container> sh` gives you a
@@ -244,7 +244,8 @@ lists for it, on `arn:aws:s3:::<bucket>` or `arn:aws:s3:::<bucket>/<key>`:
 | ListMultipartUploads | `s3:ListBucketMultipartUploads` | bucket |
 | GetObject, HeadObject | `s3:GetObject` | object |
 | PutObject | `s3:PutObject` | object |
-| CopyObject | `s3:PutObject`, then `s3:GetObject` | destination, then source object |
+| CopyObject | `s3:GetObject`, then, for a source with tags under the `COPY` tagging directive, `s3:GetObjectTagging`; then `s3:PutObject`, then, for that source, `s3:PutObjectTagging` | source object, then destination |
+| UploadPartCopy | `s3:PutObject`, then `s3:GetObject` | destination, then source object |
 | DeleteObject, DeleteObjects | `s3:DeleteObject` | object, each key for DeleteObjects |
 | CreateMultipartUpload, UploadPart, CompleteMultipartUpload | `s3:PutObject` | object |
 | AbortMultipartUpload | `s3:AbortMultipartUpload` | object |
@@ -257,6 +258,8 @@ lists for it, on `arn:aws:s3:::<bucket>` or `arn:aws:s3:::<bucket>/<key>`:
 | PutBucketOwnershipControls, DeleteBucketOwnershipControls; GetBucketOwnershipControls | `s3:PutBucketOwnershipControls`; `s3:GetBucketOwnershipControls` | bucket |
 | PutBucketAcl, GetBucketAcl | `s3:PutBucketAcl`, `s3:GetBucketAcl` | bucket |
 | PutObjectAcl, GetObjectAcl | `s3:PutObjectAcl`, `s3:GetObjectAcl` | object |
+| PutObjectTagging, GetObjectTagging, DeleteObjectTagging | `s3:PutObjectTagging`, `s3:GetObjectTagging`, `s3:DeleteObjectTagging` | object |
+| GetObjectAttributes | `s3:GetObject`, then `s3:GetObjectAttributes` | object |
 | PutBucketEncryption, DeleteBucketEncryption; GetBucketEncryption | `s3:PutEncryptionConfiguration`; `s3:GetEncryptionConfiguration` | bucket |
 
 A write's headers add actions on the same resource. CreateBucket with an
@@ -266,11 +269,41 @@ and with an ACL (`x-amz-acl` or `x-amz-grant-*`) other than `private`
 ACL also need `s3:PutObjectAcl`, except for the canned `private` and
 `bucket-owner-full-control`, which need only `s3:PutObject`, as a bucket
 with ACLs disabled accepts them. A grant header always needs
-`s3:PutObjectAcl`, even one naming the owner alone. The preflight `OPTIONS`
-of [CORS](#cors) is not an operation and is never evaluated.
+`s3:PutObjectAcl`, even one naming the owner alone. PutObject,
+CreateMultipartUpload and CopyObject with a non-empty `x-amz-tagging` also
+need `s3:PutObjectTagging`, a copy only under `x-amz-tagging-directive:
+REPLACE`, since under `COPY` the header is not read.
+
+A CopyObject under `COPY`, the default, of a source with tags gives the
+copy those tags, and needs `s3:PutObjectTagging` on the destination and
+`s3:GetObjectTagging` on the source. AWS does not list
+`s3:GetObjectTagging` for CopyObject; without it a caller could read tags
+it may not read by copying their object and reading the copy's, so it is
+required, a choice, the closed one. A copy of a source without tags needs
+neither, and one under `REPLACE` is checked as above. A copy's source is
+checked before its destination, `s3:GetObject` and then
+`s3:GetObjectTagging`, and the source's tags are supplied to the
+destination's checks only once those pass, so a caller denied the source's
+read is denied the same way whatever the source's tags, and learns nothing
+of them.
+
+UploadPartCopy needs `s3:GetObject` on the source and `s3:PutObject` on the
+destination, and takes `x-amz-source-expected-bucket-owner` as CopyObject
+does. GetObjectAttributes needs both `s3:GetObject` and
+`s3:GetObjectAttributes`, as its API reference says; the Service
+Authorization Reference lists only `s3:GetObject` and
+`s3:GetObjectVersion` for it. A GetObject or HeadObject is answered
+`x-amz-tagging-count` only when the caller is also allowed
+`s3:GetObjectTagging` on the object ([Object tagging](#object-tagging));
+that evaluation never refuses the read.
+
+The preflight `OPTIONS` of [CORS](#cors) is not an operation and is never
+evaluated.
 
 A request for something not implemented (`501 NotImplemented`) is refused
 before it is evaluated.
+
+### Condition keys
 
 The global condition keys supplied are `aws:SourceIp` (the TCP peer),
 `aws:CurrentTime`, `aws:EpochTime`, `aws:SecureTransport`,
@@ -300,7 +333,41 @@ S3 keys such as `s3:prefix`,
 them for, when the request carries a value; the README lists them all. A
 value over 4096 bytes is refused with `400 InvalidArgument`.
 
-The gaps, as the README lists them:
+The object tag keys are supplied for the actions the reference lists them
+for:
+
+- `s3:ExistingObjectTag/<key>`, each tag stored for the object acted on,
+  for `s3:GetObject` (GetObject, HeadObject, GetObjectAttributes, and the
+  source of CopyObject and UploadPartCopy), `s3:GetObjectAcl`,
+  `s3:PutObjectAcl`, `s3:GetObjectAttributes`, `s3:GetObjectTagging`,
+  `s3:PutObjectTagging` and `s3:DeleteObjectTagging`. A missing object has
+  none. It is not supplied to a write, nor to the `s3:PutObjectTagging` a
+  write's `x-amz-tagging` adds, as S3 does not support it for those. The
+  tags are read once per request, when it is evaluated, with the ETag and
+  modification time of their object, and the decision is bound to that
+  object: once the operation opens the object it acts on, it checks that
+  the object has the same ETag, modification time and tag set, and that
+  there was an object when it was evaluated. When it does not, because a
+  write replaced the object or a PutObjectTagging retagged it meanwhile,
+  the operation does nothing and answers `409 OperationAborted`, which asks
+  the client to try again; it is not evaluated again, a choice. So an
+  operation is never performed on an object, or with tags, its decision
+  was not made for. The root principal is not evaluated, so its operations
+  are not checked. A read of the tags that fails is `500 InternalError`.
+- `s3:RequestObjectTag/<key>`, each tag the request sets, and
+  `s3:RequestObjectTagKeys`, their keys, for `s3:PutObject` and
+  `s3:PutObjectTagging`: the tags of PutObjectTagging's document, and of the
+  `x-amz-tagging` header of PutObject, CreateMultipartUpload and a
+  CopyObject under `REPLACE`. A copy under `COPY` sets its source's tags,
+  which are its request's tags here, so a condition on the tags a write
+  sets applies to the tags a copy copies; AWS does not document how copied
+  tags are evaluated, and this is a choice, the closed one. They are the
+  tags of the source the copy is bound to, so the tags copied are the tags
+  evaluated. PutObjectTagging therefore parses its document before it is
+  evaluated, so a malformed one is refused before a caller's permission is
+  known.
+
+### Gaps
 
 - Bucket policies stored by v0.7.0 and earlier are unbound: they keep
   matching their principals by ARN, so a user or role deleted and created
@@ -324,14 +391,74 @@ The gaps, as the README lists them:
   as on S3 without it.
 - `s3:signatureAge`, `s3:TlsVersion` and the other S3 keys not listed are
   not supplied.
-- Object tagging and object lock headers on a write are ignored, so such a
-  write needs only `s3:PutObject`.
+- Object lock headers on a write (`x-amz-object-lock-*`) are ignored, so
+  such a write needs only `s3:PutObject`, where S3 also needs
+  `s3:PutObjectRetention` and the like.
 - An object written with a customer-provided key (SSE-C) is read without
   it, where S3 refuses a read that lacks the key, so the key is no
   safeguard here; a read with SSE-C headers of an object stored without
   them is served ([Default encryption](#default-encryption)).
 - Access point policies, permissions boundaries, session policies, SCPs and
   RCPs are not evaluated.
+- CopyObject checks the source before the destination, so that the
+  source's tags, which are the destination's request tags, reach a policy
+  only once the caller may read them; UploadPartCopy, which copies no tags,
+  checks the destination first. S3 does not document its order, which
+  decides the action a doubly denied copy names.
+
+### Changes in v0.10.1
+
+- A CopyObject under the `COPY` tagging directive, the
+  default, of a source with tags also needs `s3:GetObjectTagging` on the
+  source and `s3:PutObjectTagging` on the destination, and the source's
+  tags are its `s3:RequestObjectTag/<key>` and `s3:RequestObjectTagKeys`
+  ([Actions and resources](#actions-and-resources),
+  [Condition keys](#condition-keys)). Up to v0.10.0 it needed only
+  `s3:GetObject` and `s3:PutObject`, so a caller could copy tags it may
+  not read and set tags it may not set. A policy that allows such a copy
+  with those two actions alone now refuses it with `403 AccessDenied`; a
+  copy of a source without tags, or under `REPLACE`, needs what it did.
+- CopyObject checks its source before its destination, so a
+  copy denied both names `s3:GetObject` on the source, where it named
+  `s3:PutObject` on the destination. The source's tags are supplied to the
+  destination's checks only once the source's read is allowed
+  ([Actions and resources](#actions-and-resources)).
+- **Fix:** a decision made on `s3:ExistingObjectTag/<key>` is bound to the
+  object whose tags it was made on. A request racing a write that replaced
+  the object, or a retagging, could be decided on the previous object's
+  tags and then act on the new one, such as a GetObject allowed on an
+  untagged object serving its replacement tagged to be denied. Such a
+  request now answers `409 OperationAborted` and does nothing
+  ([Condition keys](#condition-keys)).
+- **Fix:** the tags a write sets are stored with the object, so it is
+  never visible without them; it was, for a moment after its write, and a
+  request in that moment saw no tags ([Object tagging](#object-tagging)).
+  Objects and tags stored by v0.10.0 are read as they were.
+
+### Changes in v0.10.0
+
+- Object tagging is served: PutObjectTagging,
+  GetObjectTagging and DeleteObjectTagging, which answered `501
+  NotImplemented`, and the `x-amz-tagging` header of PutObject,
+  CreateMultipartUpload and CopyObject, with `x-amz-tagging-directive`,
+  which was accepted and ignored, so a write carrying it now stores its tags
+  and is refused with `400` when they break S3's limits
+  ([Object tagging](#object-tagging)). GetObject and HeadObject answer
+  `x-amz-tagging-count`.
+- A write with a non-empty `x-amz-tagging` also needs
+  `s3:PutObjectTagging`, which it did not, and `s3:ExistingObjectTag/<key>`,
+  `s3:RequestObjectTag/<key>` and `s3:RequestObjectTagKeys` are supplied
+  ([Condition keys](#condition-keys)). A policy that allows a tagged write
+  with `s3:PutObject` alone now refuses it.
+- `x-amz-copy-source-if-match`, `-if-none-match`,
+  `-if-modified-since` and `-if-unmodified-since` on CopyObject, which were
+  accepted and ignored, are evaluated against the source, and a copy whose
+  condition fails is refused with `412 PreconditionFailed`
+  ([Part copies and copy conditions](#part-copies-and-copy-conditions)).
+- UploadPartCopy and GetObjectAttributes, which answered `501
+  NotImplemented`, are served
+  ([Part copies and copy conditions](#part-copies-and-copy-conditions),
+  [Object attributes](#object-attributes)).
 
 ### Changes in v0.9.0
 
@@ -619,6 +746,130 @@ with that header, and a read with SSE-C headers of an object stored
 without them, are served. **Nothing is encrypted**, with KMS or otherwise:
 objects are stored as sent, and SSE-KMS is accepted and reported only.
 
+## Object tagging
+
+PutObjectTagging (`PUT /<bucket>/<key>?tagging`, `200` with no body),
+GetObjectTagging (`GET`, `200` with the object's `Tagging` document) and
+DeleteObjectTagging (`DELETE`, `204 No Content`), as their API references
+answer them. Each takes `x-amz-expected-bucket-owner`; `?versionId` is
+`501 NotImplemented`, as for every operation. A tag set replaces the
+object's whole set, and an empty one removes it, as on S3.
+GetObjectTagging of an object without tags answers an empty `TagSet`, and
+DeleteObjectTagging of one answers `204`; S3 documents neither case. A
+missing object is `404 NoSuchKey` for all three. A PutObjectTagging
+document over 64 KB is refused with `400 MaxMessageLengthExceeded`, a
+choice. `Content-MD5` and the checksum headers are accepted and ignored.
+
+Tags are set at once on a write by `x-amz-tagging` on PutObject,
+CreateMultipartUpload and CopyObject. The header is encoded as URL query
+parameters (`Key1=Value1&Key2=Value2`): it is split at `&`, each pair at
+its first `=`, and each half decoded as a query component, `+` being a
+space; a pair without `=` has an empty value and an empty pair is skipped.
+A copy takes its source's tags under `x-amz-tagging-directive: COPY`, the
+default, and its own header's under `REPLACE`; under `COPY` the header is
+not read, and a source with tags needs `s3:GetObjectTagging` on it and
+`s3:PutObjectTagging` on the destination
+([Actions and resources](#actions-and-resources)). Another directive is
+`400 InvalidArgument`, a choice. A multipart upload's object gets the tags
+its CreateMultipartUpload named when it completes.
+
+S3's limits are refused with `400 InvalidTag`, whose messages are choices:
+at most 10 tags; a key of 1 to 128 Unicode characters and a value of 0 to
+256; and the characters, the reserved `aws:` prefix and unique keys, with
+the rules and messages of a bucket's tags ([Tagging](#tagging)). A
+PutObjectTagging document without a `TagSet` is `400 MalformedXML`. An
+`x-amz-tagging` header that does not decode, or names a key twice, is `400
+InvalidArgument`, with the message S3 is reported to answer; S3 documents
+neither case.
+
+GetObject and HeadObject answer `x-amz-tagging-count` only for an object
+with tags, and only to a caller allowed `s3:GetObjectTagging` on it, which
+is evaluated without refusing the read. A standalone server's key, which
+is never evaluated, is always answered it.
+
+The tags a write, copy or completed upload sets are stored in the object
+itself, in the record of its metadata written with its bytes, so the
+object is never visible without them. PutObjectTagging and
+DeleteObjectTagging store the object's new tag set, empty for a delete, in
+a side file per object, as its ACL is
+([Object Ownership and ACLs](#object-ownership-and-acls)), with the
+object's ETag and modification time; the side file, when it was stored for
+the object as it now is, overrides the tags the object was written with,
+and is ignored otherwise. So an object written over, or deleted and
+written again, never shows its predecessor's tags. An object written by
+v0.10.0 has no tags of its own, and its side file still applies to it. The
+tag conditions of policies are described under
+[Condition keys](#condition-keys).
+
+## Part copies and copy conditions
+
+UploadPartCopy (`PUT /<bucket>/<key>?partNumber=<n>&uploadId=<id>` with
+`x-amz-copy-source`) copies the source object, or the bytes
+`x-amz-copy-source-range` selects, into the part, and answers `200` with a
+`CopyPartResult` of the part's `ETag` and `LastModified`, and the
+encryption headers UploadPart answers. `x-amz-copy-source` is read as
+CopyObject reads it; `?versionId` in it is `501 NotImplemented`. The bytes
+are streamed from the source as it was opened, so a source written over
+meanwhile is copied as it was. The part's ETag is the MD5 of its bytes, and
+a completion assembles copied and uploaded parts alike, with S3's multipart
+ETag.
+
+- `x-amz-copy-source-range` must be `bytes=first-last`, zero-based decimal
+  offsets with first at most last; any other form, an open range included,
+  and a range that does not end within the source, are `400
+  InvalidArgument`.
+- A range of a source of at most 5 MiB is `400 InvalidRequest`, as S3
+  copies a range only from a source over 5 MB (read as 5 MiB, a choice). A
+  whole copy of such a source is a valid part.
+- A copied part is at most 5 GiB; a larger one is `400 EntityTooLarge`, a
+  choice of code. As for an uploaded part, a part under 5 MiB other than
+  the last fails the completion with `400 EntityTooSmall`.
+- A missing upload is `404 NoSuchUpload`; a missing source is `404
+  NoSuchKey` to a caller allowed `s3:ListBucket` on the source bucket and
+  `403 AccessDenied` to any other, as for CopyObject.
+
+CopyObject and UploadPartCopy evaluate `x-amz-copy-source-if-match`,
+`-if-none-match`, `-if-modified-since` and `-if-unmodified-since` against
+the source as it is read: `if-match` true and `if-unmodified-since` false
+copies, and `if-none-match` false and `if-modified-since` true is refused,
+which is RFC 7232's order. A condition that does not hold is `412
+PreconditionFailed`. ETags are compared without their quotes, `*` matches
+any object for `if-match` and refuses every one for `if-none-match`, and
+dates are compared to the second. A date that is not an HTTP date is
+ignored, as RFC 7232 has a recipient ignore it; S3 documents neither case.
+
+## Object attributes
+
+GetObjectAttributes (`GET /<bucket>/<key>?attributes`) answers only the
+attributes `x-amz-object-attributes` names, with the object's
+`Last-Modified`. The header may be repeated or hold a comma-separated list;
+one naming none, or a value other than `ETag`, `Checksum`, `ObjectParts`,
+`StorageClass` and `ObjectSize`, is `400 InvalidArgument`, a choice. A
+missing object is `404 NoSuchKey` to a caller allowed `s3:ListBucket` and
+`403 AccessDenied` to any other, and `x-amz-server-side-encryption` is
+refused as on GetObject.
+
+- `ETag` is the unquoted digest and `StorageClass` is `STANDARD`, as the
+  AWS CLI's `get-object-attributes` example shows them.
+- `Checksum` is never answered: no checksum is stored
+  ([Differences from S3](#differences-from-s3)). The response is valid
+  without it, but differs from S3, where a current object always has a
+  checksum to answer, since S3 attaches a CRC-64/NVME checksum to every
+  object uploaded without one.
+- `ObjectParts` is answered for an object completed from a multipart
+  upload, and left out for any other: `PartsCount`, `MaxParts`,
+  `PartNumberMarker`, `IsTruncated`, `NextPartNumberMarker` when truncated,
+  and one `Part` per part with its `PartNumber` and `Size`, paged as
+  ListParts pages: after `x-amz-part-number-marker`, at most
+  `x-amz-max-parts` (1000 when absent, and never more). AWS's references
+  conflict on whether `Part` is listed for an object without an additional
+  checksum; it is listed here on the inference that a current S3 object's
+  parts are, which the documentation does not establish. Each `Part`
+  carries no checksum members, since none is stored, which differs from
+  S3. A part's `PartNumber` is its position in the object, from 1, not the
+  number it was uploaded and completed with
+  ([Differences from S3](#differences-from-s3)).
+
 ## Health checks
 
 `GET /_health` (liveness) and `GET /_ready` (readiness) answer without a
@@ -679,11 +930,17 @@ bucket are refused, as on S3.
   paging and `encoding-type=url`.
 - **Objects:** PutObject (including aws-chunked streaming uploads), GetObject
   (ranges, `partNumber`, `response-*` overrides, conditional GETs), HeadObject,
-  CopyObject (`COPY` and `REPLACE` metadata directives), DeleteObject,
-  DeleteObjects.
-- **Multipart uploads:** CreateMultipartUpload, UploadPart,
-  CompleteMultipartUpload, AbortMultipartUpload, ListParts,
-  ListMultipartUploads. ETags and the 5 MiB minimum part size follow S3.
+  CopyObject (`COPY` and `REPLACE` metadata and tagging directives,
+  `x-amz-copy-source-if-*` conditions), DeleteObject, DeleteObjects,
+  GetObjectAttributes ([above](#object-attributes)).
+- **Object tagging** ([above](#object-tagging)): PutObjectTagging,
+  GetObjectTagging, DeleteObjectTagging, `x-amz-tagging` on PutObject,
+  CreateMultipartUpload and CopyObject, and `x-amz-tagging-count` on
+  GetObject and HeadObject.
+- **Multipart uploads:** CreateMultipartUpload, UploadPart, UploadPartCopy
+  ([above](#part-copies-and-copy-conditions)), CompleteMultipartUpload,
+  AbortMultipartUpload, ListParts, ListMultipartUploads. ETags and the 5
+  MiB minimum part size follow S3.
 - **Conditional writes:** `If-None-Match: *` and `If-Match` on PutObject,
   CopyObject and CompleteMultipartUpload.
 - **Presigned URLs** for GET and PUT.
@@ -712,7 +969,7 @@ bucket are refused, as on S3.
     ghcr.io/tulehq/object-store:0.3.1
   docker run -d --name new -p 9001:9000 -v s3data-new:/data \
     -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
-    ghcr.io/tulehq/object-store:0.9.0
+    ghcr.io/tulehq/object-store:0.10.1
   export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1
   for b in $(aws s3 ls --endpoint-url http://localhost:9000 | awk '{print $3}'); do
     aws s3 sync "s3://$b" "copy/$b" --endpoint-url http://localhost:9000
@@ -763,12 +1020,14 @@ bucket are refused, as on S3.
   URL is a bearer grant over every key in the bucket for that operation:
   any keys to delete, or any of the upload's parts to complete.
 - **Not implemented** (requests return `501 NotImplemented`): enabling
-  versioning, object tagging, lifecycle configuration, object lock,
-  UploadPartCopy, and browser POST-policy uploads.
-- **Accepted but ignored:** `x-amz-copy-source-if-*` conditions, a copy
-  source's SSE-C headers (`x-amz-copy-source-server-side-encryption-customer-*`),
-  the SSE-C headers of a read, and additional checksums
-  (`x-amz-checksum-*`, neither verified nor returned). SSE-S3, SSE-KMS and
+  versioning, lifecycle configuration, object lock, and browser POST-policy
+  uploads.
+- **Accepted but ignored:** a copy source's SSE-C headers
+  (`x-amz-copy-source-server-side-encryption-customer-*`, on CopyObject and
+  UploadPartCopy), the SSE-C headers of a read and of GetObjectAttributes,
+  and additional checksums (`x-amz-checksum-*`, neither verified nor
+  returned, so GetObjectAttributes answers no `Checksum` and its parts no
+  checksums, [Object attributes](#object-attributes)). SSE-S3, SSE-KMS and
   SSE-C headers and bucket defaults on writes are validated, recorded and
   reported, but nothing is encrypted, and reads of an SSE-C object do not
   need its key; `x-amz-server-side-encryption` on a read of any other
@@ -776,10 +1035,20 @@ bucket are refused, as on S3.
   ([Default encryption](#default-encryption)). ACLs are stored and
   reported, never evaluated ([Object Ownership and ACLs](#object-ownership-and-acls)).
 - HeadObject ignores conditional request headers.
+- **Parts are numbered by position.** An object completed from a
+  multipart upload stores its parts' sizes in order, not their numbers, so
+  GetObjectAttributes reports each part's `PartNumber` as its position: an
+  upload completed from parts 1 and 3 reports parts 1 and 2, where S3
+  reports the part numbers. `x-amz-part-number-marker` counts positions
+  too, and so does the `partNumber` of GetObject and HeadObject.
+- **Tag lengths** are counted in Unicode characters (code points), where
+  S3 represents tags in UTF-16, in which some characters take 2 positions:
+  a key or value holding characters outside the Basic Multilingual Plane,
+  such as emoji, may be accepted here at lengths S3 refuses.
 
 ## Release and module
 
 This page follows the object-store README at
-[v0.9.0](https://github.com/tulehq/object-store/blob/v0.9.0/README.md), released as
-`ghcr.io/tulehq/object-store:0.9.0`. Its Go module is `tule.dev/object-store`, with the
+[v0.10.1](https://github.com/tulehq/object-store/blob/v0.10.1/README.md), released as
+`ghcr.io/tulehq/object-store:0.10.1`. Its Go module is `tule.dev/object-store`, with the
 source at [github.com/tulehq/object-store](https://github.com/tulehq/object-store).
