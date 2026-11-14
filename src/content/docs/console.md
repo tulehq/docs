@@ -1,6 +1,6 @@
 ---
 title: console
-description: "console 0.3.0: a web console for every Tule service."
+description: "console 0.3.2: a web console for every Tule service."
 ---
 
 A web console for [Tule](https://github.com/tulehq): browse every running
@@ -25,7 +25,7 @@ With Docker, pointed at services on the host:
 docker run --rm -p 9070:9070 \
   -e TULE_Console_ObjectStoreEndpoint=http://host.docker.internal:9000 \
   -e TULE_Console_MailboxEndpoint=http://host.docker.internal:9040 \
-  ghcr.io/tulehq/console:0.3.0
+  ghcr.io/tulehq/console:0.3.2
 ```
 
 Then open `http://localhost:9070` and sign in. The image is based on Alpine
@@ -45,7 +45,7 @@ accounts' 9020, identity's 9030, mailbox's 9040, queues' 9050 and functions'
 
 ### Every service together, in Docker Compose
 
-[`compose.yaml`](https://github.com/tulehq/console/blob/v0.3.0/compose.yaml) runs every service and the console, wired
+[`compose.yaml`](https://github.com/tulehq/console/blob/v0.3.2/compose.yaml) runs every service and the console, wired
 together: one root key everywhere, every service pointed at identity so the
 keys identity issues work on all of them, each held to its IAM policies, and
 the console pointed at each. It pins the current release of every service.
@@ -72,7 +72,7 @@ x-identity: &identity-endpoint
 
 services:
   identity:
-    image: ghcr.io/tulehq/identity:0.4.1
+    image: ghcr.io/tulehq/identity:0.5.0
     environment:
       <<: *root-key
       TULE_Identity_AccountsEndpoint: http://accounts:9020
@@ -80,35 +80,35 @@ services:
     volumes: [identitydata:/data]
 
   accounts:
-    image: ghcr.io/tulehq/accounts:0.4.0
+    image: ghcr.io/tulehq/accounts:0.5.0
     environment:
       <<: [*root-key, *identity-endpoint]
     ports: ["9020:9020"]
     volumes: [accountsdata:/data]
 
   object-store:
-    image: ghcr.io/tulehq/object-store:0.7.0
+    image: ghcr.io/tulehq/object-store:0.8.0
     environment:
       <<: [*root-key, *identity-endpoint]
     ports: ["9000:9000"]
     volumes: [objectdata:/data]
 
   secret-store:
-    image: ghcr.io/tulehq/secret-store:0.4.0
+    image: ghcr.io/tulehq/secret-store:0.6.0
     environment:
       <<: [*root-key, *identity-endpoint]
     ports: ["9010:9010"]
     volumes: [secretdata:/data]
 
   mailbox:
-    image: ghcr.io/tulehq/mailbox:0.3.0
+    image: ghcr.io/tulehq/mailbox:0.4.0
     environment:
       <<: [*root-key, *identity-endpoint]
     ports: ["9040:9040"]
     volumes: [maildata:/data]
 
   queues:
-    image: ghcr.io/tulehq/queues:0.3.0
+    image: ghcr.io/tulehq/queues:0.5.0
     environment:
       <<: [*root-key, *identity-endpoint]
       # Queue URLs name the host clients on this machine reach queues at.
@@ -117,7 +117,7 @@ services:
     volumes: [queuesdata:/data]
 
   functions:
-    image: ghcr.io/tulehq/functions:0.3.0
+    image: ghcr.io/tulehq/functions:0.5.0
     profiles: [functions]
     depends_on:
       queues: {condition: service_healthy}
@@ -135,7 +135,7 @@ services:
     group_add: ["${DOCKER_GID:-0}"]
 
   console:
-    image: ghcr.io/tulehq/console:0.3.0
+    image: ghcr.io/tulehq/console:0.3.2
     depends_on:
       identity: {condition: service_healthy}
       accounts: {condition: service_healthy}
@@ -307,7 +307,7 @@ missing.
 
 A bucket's, secret's, queue's and function's page has a Policy section, and
 an email identity's page its sending authorization policies. The section
-shows the stored policy as indented JSON in a textarea to edit and save
+shows the policy as the service's own read returns it, as indented JSON, in a textarea to edit and save
 with the service's own operation, and a delete; a resource without one has
 an empty form with an example naming the resource. Saving sends the
 document as it was typed. A document the service refuses, such as
@@ -315,15 +315,35 @@ object-store's `MalformedPolicy` or secret-store's `PublicPolicyException`,
 is shown next to the form with the service's code and message, and the
 form keeps the document as it was sent.
 
+With an identity endpoint, each service binds the IAM user and role ARNs in
+a policy's `Principal` and `NotPrincipal` to the principals' unique IDs when
+it stores the policy, as AWS does, and its read shows each one as the
+principal's current ARN while that user or role exists, and as its unique
+ID (`AIDA...` for a user, `AROA...` for a role) once it is deleted, even
+when a user or role of the same name exists again. The section shows the
+document so, and saving it again keeps the ID, which still names the
+deleted principal and no other. A save naming a user or role ARN that no
+principal has is refused, the service's code and message shown next to the
+form. Account IDs, root ARNs, `*`, role session ARNs, service principals and
+ARNs in conditions are kept as written.
+
 **A change made since the page was loaded is never lost.** Each form sends
-back the version of the policy the page read (a SHA-256 of the stored
-document, empty for none), and the console reads the policy again before it
+back the version of the policy the page read (a SHA-256 of the document
+as the service's read returns it, empty for none), and the console reads the policy again before it
 writes. One that changed, whether another client replaced it, added a
 statement with `AddPermission` or deleted it, refuses the save or delete
 with `409`, "The policy changed since the page was loaded", next to the
 form, which keeps the document as sent and shows the stored one below it.
 Saving again from that answer replaces the policy as it is now. A
-function's policy is guarded by its `RevisionId` instead. The check and the
+function's policy is guarded by its `RevisionId` instead. A user or role a
+policy names that is deleted after the page was read is such a change for a
+bucket, a secret, a queue and an email identity, since the service's read
+then shows its unique ID where the page read its ARN: the save is refused
+with `409`, the unique ID in the stored policy shown below the form.
+Deleting a principal does not change a function's `RevisionId`, so a
+function's save from that page goes through and stores the document as
+sent; one that still names the deleted ARN is refused by functions as naming
+no principal. The check and the
 write are two calls, so a change in between is not caught; creating a named
 sending authorization policy is not checked, since mailbox refuses a name
 the identity has, and removing one statement by its `Sid` is not checked.
@@ -485,7 +505,7 @@ source mapping, each enabled or disabled from there.
   sign-in form has a token of its own in a cookie for the sign-in path.
 - **Static files** are embedded in the binary: one stylesheet, a small
   script, and htmx 2.0.11 from its npm package, unmodified, with its
-  license and checksums in [third_party/htmx](https://github.com/tulehq/console/tree/v0.3.0/third_party/htmx). Nothing is
+  license and checksums in [third_party/htmx](https://github.com/tulehq/console/tree/v0.3.2/third_party/htmx). Nothing is
   loaded from a CDN.
 
 ## Health checks
@@ -512,6 +532,6 @@ shows its service's own readiness.
 ## Release and module
 
 This page follows the console README at
-[v0.3.0](https://github.com/tulehq/console/blob/v0.3.0/README.md), released as
-`ghcr.io/tulehq/console:0.3.0`. Its Go module is `tule.dev/console`, with the
+[v0.3.2](https://github.com/tulehq/console/blob/v0.3.2/README.md), released as
+`ghcr.io/tulehq/console:0.3.2`. Its Go module is `tule.dev/console`, with the
 source at [github.com/tulehq/console](https://github.com/tulehq/console).
