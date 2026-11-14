@@ -1,6 +1,6 @@
 ---
 title: object-store
-description: "object-store 0.8.0: a local stand-in for S3."
+description: "object-store 0.9.0: a local stand-in for S3."
 ---
 
 An S3-compatible object store that keeps objects on the local filesystem. It is
@@ -19,7 +19,7 @@ With Docker:
 docker run --rm -p 9000:9000 -v s3data:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
   -e TULE_Storage_Buckets=uploads,assets \
-  ghcr.io/tulehq/object-store:0.8.0
+  ghcr.io/tulehq/object-store:0.9.0
 ```
 
 The image is based on Alpine, so `docker exec -it <container> sh` gives you a
@@ -162,9 +162,12 @@ buckets here, since a bucket that does not exist has no policy to grant it;
 CreateBucket of an existing bucket that its policy allows them answers `409
 BucketAlreadyExists`. PutBucketPolicy, GetBucketPolicy and
 DeleteBucketPolicy answer another account's allowed principal with `405
-MethodNotAllowed`, as S3 does. Objects belong to the bucket owner whoever
-writes them, as under S3's default `BucketOwnerEnforced` setting, so a
-bucket policy applies to every object in its bucket.
+MethodNotAllowed`, as S3 does. Every object is evaluated as the bucket
+owner's, whoever writes it, as under S3's default Object Ownership setting,
+`BucketOwnerEnforced`, so a bucket policy applies to every object in its
+bucket. Under the other settings an object's owner is recorded and reported
+by GetObjectAcl, but not evaluated
+([Object Ownership and ACLs](#object-ownership-and-acls)).
 
 ### Bucket policies
 
@@ -182,7 +185,9 @@ DeleteBucketPolicy take S3's request and response shapes, and each takes
   `"*"` or an `s3:` action ("Policy has invalid action"), and an IAM user or
   role ARN that no user or role has ("Invalid principal in policy"; see
   [Unique-ID principals](#unique-id-principals)); an empty body is `400
-  MissingRequestBodyError`.
+  MissingRequestBodyError`. A public policy on a bucket whose
+  `BlockPublicPolicy` is on, as it is on every new bucket, is refused with
+  `403 AccessDenied` ([Block Public Access](#block-public-access)).
 - **GetBucketPolicy** answers `200` with the document as stored, its
   principals shown as S3 shows them (below), or `404 NoSuchBucketPolicy`.
 - **DeleteBucketPolicy** answers `204 No Content`, also when the bucket had
@@ -245,6 +250,24 @@ lists for it, on `arn:aws:s3:::<bucket>` or `arn:aws:s3:::<bucket>/<key>`:
 | AbortMultipartUpload | `s3:AbortMultipartUpload` | object |
 | ListParts | `s3:ListMultipartUploadParts` | object |
 | PutBucketPolicy, GetBucketPolicy, DeleteBucketPolicy | `s3:PutBucketPolicy`, `s3:GetBucketPolicy`, `s3:DeleteBucketPolicy` | bucket |
+| GetBucketPolicyStatus | `s3:GetBucketPolicyStatus` | bucket |
+| PutBucketTagging, DeleteBucketTagging; GetBucketTagging | `s3:PutBucketTagging`; `s3:GetBucketTagging` | bucket |
+| PutBucketCors, DeleteBucketCors; GetBucketCors | `s3:PutBucketCORS`; `s3:GetBucketCORS` | bucket |
+| PutPublicAccessBlock, DeletePublicAccessBlock; GetPublicAccessBlock | `s3:PutBucketPublicAccessBlock`; `s3:GetBucketPublicAccessBlock` | bucket |
+| PutBucketOwnershipControls, DeleteBucketOwnershipControls; GetBucketOwnershipControls | `s3:PutBucketOwnershipControls`; `s3:GetBucketOwnershipControls` | bucket |
+| PutBucketAcl, GetBucketAcl | `s3:PutBucketAcl`, `s3:GetBucketAcl` | bucket |
+| PutObjectAcl, GetObjectAcl | `s3:PutObjectAcl`, `s3:GetObjectAcl` | object |
+| PutBucketEncryption, DeleteBucketEncryption; GetBucketEncryption | `s3:PutEncryptionConfiguration`; `s3:GetEncryptionConfiguration` | bucket |
+
+A write's headers add actions on the same resource. CreateBucket with an
+`x-amz-object-ownership` header also needs `s3:PutBucketOwnershipControls`,
+and with an ACL (`x-amz-acl` or `x-amz-grant-*`) other than `private`
+`s3:PutBucketAcl`. PutObject, CopyObject and CreateMultipartUpload with an
+ACL also need `s3:PutObjectAcl`, except for the canned `private` and
+`bucket-owner-full-control`, which need only `s3:PutObject`, as a bucket
+with ACLs disabled accepts them. A grant header always needs
+`s3:PutObjectAcl`, even one naming the owner alone. The preflight `OPTIONS`
+of [CORS](#cors) is not an operation and is never evaluated.
 
 A request for something not implemented (`501 NotImplemented`) is refused
 before it is evaluated.
@@ -271,7 +294,8 @@ and always lets a `Deny` apply. A request whose policies do not test them
 is decided as usual.
 
 S3 keys such as `s3:prefix`,
-`s3:x-amz-acl`, `s3:x-amz-copy-source`, `s3:if-none-match`, `s3:authType`,
+`s3:x-amz-acl`, `s3:x-amz-grant-*`, `s3:x-amz-object-ownership`,
+`s3:x-amz-server-side-encryption`, `s3:x-amz-copy-source`, `s3:if-none-match`, `s3:authType`,
 `s3:signatureversion` and `s3:ResourceAccount` are supplied for the actions the reference lists
 them for, when the request carries a value; the README lists them all. A
 value over 4096 bytes is refused with `400 InvalidArgument`.
@@ -286,19 +310,80 @@ The gaps, as the README lists them:
 - A session whose role was deleted is refused.
 - Service, `CanonicalUser` and federated principals are accepted in a
   bucket policy but match no caller.
-- There is no Block Public Access and no GetBucketPolicyStatus, and ACLs
-  are not supported.
+- Block Public Access is bucket-level only: there are no account-level or
+  access point settings. ACLs are stored and reported, never evaluated, so
+  no ACL grant gives access.
 - On S3 a bucket policy `Deny` also applies to the bucket owner's root user;
   here that root is never evaluated.
 - PutBucketPolicy does not check that each action applies to the resources
   its statement names. Standalone, it does not check that a named user or
   role exists.
-- `aws:ResourceTag/*`, `s3:signatureAge`, `s3:TlsVersion` and the other S3
-  keys not listed are not supplied.
-- ACL, tagging and object lock headers on a write are ignored, so such a
+- `aws:ResourceTag/*` and `s3:BucketTag/*` are not supplied. S3 evaluates
+  them only on a bucket with ABAC enabled, which is off by default, and
+  PutBucketAbac is not implemented, so a bucket's tags reach no condition,
+  as on S3 without it.
+- `s3:signatureAge`, `s3:TlsVersion` and the other S3 keys not listed are
+  not supplied.
+- Object tagging and object lock headers on a write are ignored, so such a
   write needs only `s3:PutObject`.
+- An object written with a customer-provided key (SSE-C) is read without
+  it, where S3 refuses a read that lacks the key, so the key is no
+  safeguard here; a read with SSE-C headers of an object stored without
+  them is served ([Default encryption](#default-encryption)).
 - Access point policies, permissions boundaries, session policies, SCPs and
   RCPs are not evaluated.
+
+### Changes in v0.9.0
+
+- **Breaking:** CORS is answered per bucket, as S3 answers it, from each
+  bucket's CORS configuration ([CORS](#cors)). Up to v0.8.0 every origin
+  was allowed on every bucket. A bucket without a configuration now refuses
+  every preflight with `403 AccessForbidden`, so a browser can no longer
+  upload to or read from it. A browser-based setup needs PutBucketCors on
+  each bucket it uses, such as, for a page served from
+  `http://localhost:3000` that reads and uploads with presigned URLs:
+
+  ```sh
+  aws s3api put-bucket-cors --endpoint-url http://localhost:9000 --bucket uploads \
+    --cors-configuration '{"CORSRules":[{"AllowedOrigins":["http://localhost:3000"],
+      "AllowedMethods":["GET","PUT"],"AllowedHeaders":["*"],"ExposeHeaders":["ETag"]}]}'
+  ```
+
+  The service endpoint (`GET /`) and the health probes have no CORS
+  configuration: they send no CORS headers, and a preflight to them is
+  refused as one to a bucket without a configuration.
+- **Breaking:** a new bucket, one made by CreateBucket or by
+  `TULE_Storage_Buckets`, has all four Block Public Access settings on, as
+  S3's have since April 2023 ([Block Public Access](#block-public-access)):
+  PutBucketPolicy of a public policy on it is refused with `403
+  AccessDenied` until DeletePublicAccessBlock or PutPublicAccessBlock turns
+  `BlockPublicPolicy` off. Buckets that exist before the upgrade have no
+  Block Public Access configuration and keep accepting public policies.
+- **Breaking:** a new bucket has Object Ownership `BucketOwnerEnforced`,
+  ACLs disabled, as S3's have since April 2023
+  ([Object Ownership and ACLs](#object-ownership-and-acls)). An `x-amz-acl`
+  or `x-amz-grant-*` header on a write to it, which was accepted and
+  ignored, is refused with `400 AccessControlListNotSupported` unless it
+  grants the bucket owner full control alone (`bucket-owner-full-control`,
+  `private` or the equivalent grant); CreateBucket with such an ACL is
+  refused with `400 InvalidBucketAclWithObjectOwnership`. Buckets that
+  exist before the upgrade have no ownership controls, behave as
+  `ObjectWriter`, and accept ACLs as before, now storing them.
+- A write carrying a grant header or a canned ACL other than `private` and
+  `bucket-owner-full-control` also needs `s3:PutObjectAcl`, and CreateBucket
+  with an ACL other than `private` or with `x-amz-object-ownership` also
+  `s3:PutBucketAcl` or `s3:PutBucketOwnershipControls`
+  ([Actions and resources](#actions-and-resources)).
+- PutObject, CopyObject, CreateMultipartUpload, UploadPart,
+  CompleteMultipartUpload, GetObject and HeadObject answer with
+  `x-amz-server-side-encryption`, `AES256` unless the request or the
+  bucket's default encryption names SSE-KMS, or, for a write with a
+  customer-provided key, with the SSE-C headers instead; a malformed SSE-C
+  request, which was accepted, is refused
+  ([Default encryption](#default-encryption)).
+- The tagging, CORS, public access block, policy status, ownership
+  controls, ACL and encryption subresources, which answered `501
+  NotImplemented`, are served.
 
 ### Changes in v0.8.0
 
@@ -327,6 +412,212 @@ The gaps, as the README lists them:
 - `x-amz-expected-bucket-owner` was ignored; a value other than
   `TULE_Auth_AccountID` is now refused.
 - Buckets have generations ([above](#bucket-generations)).
+
+## Bucket configuration
+
+Each configuration is kept with its bucket, as the bucket policy is, read
+and changed under the bucket's generation ([Bucket generations](#bucket-generations)),
+and deleted with the bucket. The writes are evaluated before their document
+is read. Each takes `x-amz-expected-bucket-owner`, and `Content-MD5` and the
+checksum headers are accepted and ignored. A Put answers `200` with no body
+and a Delete `204`, also when the bucket had no such configuration. A
+document over 64 KB is refused with `400 MaxMessageLengthExceeded`. S3 sets
+that limit for CORS; the README marks applying it to the others, and each
+error code and message S3 does not document, as a choice.
+
+### Tagging
+
+PutBucketTagging, GetBucketTagging and DeleteBucketTagging. A tag set
+replaces the bucket's whole set. S3's rules are refused with `400
+InvalidTag`:
+
+- at most 50 tags;
+- a key of 1 to 128 Unicode characters, a value of 0 to 256;
+- letters, numbers, spaces and `_ . : / = + - @`;
+- no key starting with the reserved `aws:` prefix, in any case;
+- no key twice.
+
+A document without a `TagSet` is `400 MalformedXML`. An empty `TagSet` is
+stored, and read back empty. GetBucketTagging of a bucket without tags is
+`404 NoSuchTagSet`. A bucket's tags reach no condition key
+([Actions and resources](#actions-and-resources)).
+
+### CORS
+
+PutBucketCors, GetBucketCors (`404 NoSuchCORSConfiguration`) and
+DeleteBucketCors, with S3's rules: 1 to 100 rules, each with at least one
+`AllowedOrigin` and one `AllowedMethod` (`400 MalformedXML` without),
+methods among `GET`, `PUT`, `POST`, `DELETE` and `HEAD`, at most one `*` in
+each `AllowedOrigin` and `AllowedHeader`, and an `ID` of at most 255
+characters. These are refused with `400 InvalidRequest`, as are an
+`ExposeHeader` holding a `*` and a negative `MaxAgeSeconds`.
+
+A request is matched against the bucket's rules as S3 matches it: the first
+rule whose `AllowedOrigin` matches `Origin`, whose `AllowedMethod` is the
+method, and, for a preflight, whose `AllowedHeader` entries match every
+header in `Access-Control-Request-Headers`. A `*` stands for any run of
+characters. Origins and methods are compared exactly and header names
+regardless of case. The bucket is the one the path or a
+`<bucket>.<TULE_Server_Domain>` host names.
+
+- **Preflight** (`OPTIONS` with `Origin` and
+  `Access-Control-Request-Method`) is answered without a signature, as
+  browsers send it, and only a preflight is: any other `OPTIONS` is
+  verified as every request is. One a rule allows gets `200` with
+  `Access-Control-Allow-Origin`, `Access-Control-Allow-Methods` (the rule's
+  methods), `Access-Control-Allow-Headers` (the headers requested),
+  `Access-Control-Expose-Headers`, `Access-Control-Max-Age` (when the rule
+  sets `MaxAgeSeconds`), `Access-Control-Allow-Credentials: true` and
+  `Vary: Origin, Access-Control-Request-Headers,
+  Access-Control-Request-Method`. One no rule allows gets `403
+  AccessForbidden`, "CORSResponse: This CORS request is not allowed. ...",
+  and one to a bucket without a configuration, or that does not exist, `403
+  AccessForbidden`, "CORSResponse: CORS is not enabled for this bucket."
+- **Any other request with `Origin`** that a rule allows for its method
+  gets the same headers but `Access-Control-Allow-Headers`, on its
+  response whatever it is, errors included, so the page can read a
+  refusal. The request is verified and authorized as usual: CORS grants no
+  access and takes none away.
+- The rule's first `AllowedOrigin` entry that matches the origin decides
+  the answer: a bare `*` is answered with `Access-Control-Allow-Origin: *`
+  and no `Access-Control-Allow-Credentials`, and any other entry with the
+  request's origin, so a rule listing `https://a.example` before `*`
+  answers that origin as itself.
+- `Vary` is sent on every response to a request with `Origin` to a bucket
+  with a configuration, whether or not a rule matched. A request without
+  `Origin` reads no configuration and gets no CORS headers.
+
+### Block Public Access
+
+PutPublicAccessBlock, GetPublicAccessBlock (`404
+NoSuchPublicAccessBlockConfiguration`) and DeletePublicAccessBlock, for the
+bucket: there are no account-level settings. A setting left out of
+PutPublicAccessBlock is off. A new bucket has all four on, as new buckets
+on S3 have since April 2023.
+
+A bucket policy is public by S3's rule: an `Allow` statement whose
+principal is `"*"`, or names `"*"` as an `AWS` principal, is public unless
+its condition fixes, with values holding no wildcard or policy variable,
+under a positive operator (`StringEquals`, `StringLike`, `ArnEquals`,
+`ArnLike`, `IpAddress`, plain or `ForAnyValue:`, never `...IfExists` or
+`ForAllValues:`), one of `aws:PrincipalArn`, `aws:PrincipalAccount`,
+`aws:PrincipalOrgID`, `aws:userid` (a role's `AROA...:*` counts as fixed),
+`aws:SourceArn`, `aws:SourceVpc`, `aws:SourceVpce`, `aws:SourceOwner`,
+`aws:SourceAccount`, `s3:DataAccessPointArn` (whose access point name may
+be a wildcard) or `s3:DataAccessPointAccount`, or `aws:SourceIp` with no
+range broader than a /8 (IPv4) or /32 (IPv6). `Deny` statements are never
+public.
+
+- **BlockPublicPolicy** refuses PutBucketPolicy of a public policy with
+  `403 AccessDenied`, for every caller, the root key included. A policy
+  already stored is kept.
+- **RestrictPublicBuckets**, while the bucket's policy is public, takes the
+  whole policy away from principals of other accounts, including its
+  non-public grants to specific accounts. Such a principal is then refused
+  as if the bucket had no policy (`403 AccessDenied`, "... because no
+  resource-based policy allows the ... action"). Principals of
+  `TULE_Auth_AccountID` are evaluated with the policy as written; AWS
+  service principals match no caller here. A non-public policy is not
+  restricted.
+- **BlockPublicAcls**, under `ObjectWriter` or `BucketOwnerPreferred`,
+  refuses a public ACL (one granting `AllUsers` or `AuthenticatedUsers`)
+  on PutBucketAcl, PutObjectAcl, PutObject, CopyObject and
+  CreateMultipartUpload with `403 AccessDenied`, and CreateBucket with a
+  public ACL is refused with `400 InvalidBucketAclWithBlockPublicAccess`,
+  since the new bucket blocks them. **IgnorePublicAcls** leaves the public
+  grants out of GetBucketAcl and GetObjectAcl. Under `BucketOwnerEnforced`
+  neither has anything to act on.
+
+GetBucketPolicyStatus answers `IsPublic` by the same rule, whatever the
+settings, and `404 NoSuchBucketPolicy` for a bucket without a policy.
+
+### Object Ownership and ACLs
+
+PutBucketOwnershipControls, GetBucketOwnershipControls (`404
+OwnershipControlsNotFoundError`) and DeleteBucketOwnershipControls. A new
+bucket is `BucketOwnerEnforced` unless CreateBucket's
+`x-amz-object-ownership` names another setting; an unknown value is `400
+InvalidArgument`. A bucket without ownership controls, one made by an
+earlier version or whose controls were deleted, behaves as `ObjectWriter`.
+Setting `BucketOwnerEnforced` on a bucket whose ACL grants anyone but its
+owner is refused with `400 InvalidBucketAclWithObjectOwnership`.
+
+ACLs come from `x-amz-acl` or the `x-amz-grant-*` headers, on CreateBucket,
+PutObject, CopyObject, CreateMultipartUpload, PutBucketAcl and
+PutObjectAcl, or from PutBucketAcl's and PutObjectAcl's
+`AccessControlPolicy` document. A request with both a canned ACL and grant
+headers, or with headers and a document, is `400 InvalidRequest`. Canned
+ACLs grant what S3's table lists; `aws-exec-read`, which grants Amazon EC2,
+is `501 NotImplemented`. ACLs name accounts by a canonical user ID, here
+the hex SHA-256 of the account ID. A grantee, in a header (`id="..."`,
+`uri="..."`) or a document, is a canonical user ID of 64 lowercase hex
+digits or the URI of `AllUsers`, `AuthenticatedUsers` or `LogDelivery`;
+anything else is `400 InvalidArgument`, "Invalid id" or "Invalid group
+uri". An `emailAddress` grantee is `400 UnresolvableGrantByEmailAddress`.
+
+- **BucketOwnerEnforced** (ACLs disabled): the bucket accepts only requests
+  that specify no ACL or one granting the bucket owner full control. Any
+  other ACL on a write, PutBucketAcl or PutObjectAcl is refused with `400
+  AccessControlListNotSupported`, "The bucket does not allow ACLs", and
+  CreateBucket with an ACL granting anyone but the owner with `400
+  InvalidBucketAclWithObjectOwnership`. `bucket-owner-full-control`,
+  `private` (which grants the owner, then the bucket owner, the same full
+  control) and the equivalent grant or document are accepted. GetBucketAcl
+  and GetObjectAcl answer the bucket owner with `FULL_CONTROL`.
+- **ObjectWriter** and **BucketOwnerPreferred**: ACLs are accepted (within
+  BlockPublicAcls) and stored only as far as GetBucketAcl and GetObjectAcl
+  need to answer them: the bucket's ACL, and each object's with its owner,
+  the writer's account, or the bucket owner under `BucketOwnerPreferred`
+  with `bucket-owner-full-control`. An object written by another account
+  without an ACL is stored with the private ACL, to record its owner. An
+  object's ACL goes with that object: one written over gets its own
+  request's ACL, or the default, and a copy never takes its source's. A
+  stored ACL is kept when ACLs are disabled, and answered again when they
+  are enabled. **ACLs are never evaluated**: no grant gives or refuses
+  access, and every object is evaluated as the bucket owner's.
+
+### Default encryption
+
+PutBucketEncryption, GetBucketEncryption and DeleteBucketEncryption, with
+one rule whose default is `AES256`, `aws:kms` or `aws:kms:dsse` (`400
+MalformedXML` otherwise; `aws:fsx` and `aws:backup` are refused), and a
+`KMSMasterKeyID` only for the KMS algorithms (`400 InvalidArgument`
+otherwise). The key ID is not checked, as S3 does not check it. A bucket
+never given one, or whose encryption was deleted, answers SSE-S3, `AES256`
+with `BucketKeyEnabled` false, as S3's default is. `BlockedEncryptionTypes`
+is stored and returned; nothing is blocked.
+
+PutObject, CopyObject, CreateMultipartUpload, UploadPart and
+CompleteMultipartUpload answer, and GetObject and HeadObject replay, the
+encryption the object, or the upload's object, was stored with: the
+request's `x-amz-server-side-encryption`, its KMS key ID and bucket key
+setting, or for what the request leaves out the bucket's default. A copy
+takes its own request's or its bucket's, never its source's.
+`x-amz-server-side-encryption-aws-kms-key-id` is answered only when a key
+was named, and `x-amz-server-side-encryption-bucket-key-enabled` only when
+it is on for a KMS algorithm. An algorithm S3 does not take, a KMS key ID
+without a KMS algorithm and a bucket key setting that is not a boolean are
+refused with `400 InvalidArgument`. An object stored by an earlier version
+reports `AES256`.
+
+A write with a customer-provided key (SSE-C) is stored and answered with
+`x-amz-server-side-encryption-customer-algorithm` and
+`x-amz-server-side-encryption-customer-key-MD5` and no
+`x-amz-server-side-encryption`; the bucket default does not apply to it.
+The key MD5 is that of the key sent, which a sent MD5 must equal. The key
+is required and must be the base64 of 256 bits. An algorithm other than
+`AES256` is `400 InvalidEncryptionAlgorithmError`; a key or MD5 without the
+algorithm, the algorithm without a key or with
+`x-amz-server-side-encryption`, a key that is not the base64 of 256 bits
+and an MD5 that does not match are `400 InvalidArgument`. The key is not
+kept, and a read does not need it, where S3 refuses one without it.
+
+A GetObject or HeadObject carrying `x-amz-server-side-encryption`, of an
+object not stored with a customer key, is refused with `400
+InvalidArgument`, as S3 refuses it with a 400. A read of an SSE-C object
+with that header, and a read with SSE-C headers of an object stored
+without them, are served. **Nothing is encrypted**, with KMS or otherwise:
+objects are stored as sent, and SSE-KMS is accepted and reported only.
 
 ## Health checks
 
@@ -366,14 +657,24 @@ const client = new S3Client({
 });
 ```
 
-Browsers can upload to and download from presigned URLs directly: CORS allows
-any origin, and response headers such as `ETag` are exposed.
+Browsers can upload to and download from presigned URLs directly once the
+bucket has a CORS configuration allowing the page's origin
+([CORS](#cors)); without one, a browser's cross-origin requests to the
+bucket are refused, as on S3.
 
 ## Supported operations
 
 - **Buckets:** ListBuckets, CreateBucket, HeadBucket, DeleteBucket,
   GetBucketLocation, GetBucketVersioning (always unversioned).
-- **Bucket policies:** PutBucketPolicy, GetBucketPolicy, DeleteBucketPolicy.
+- **Bucket policies:** PutBucketPolicy, GetBucketPolicy, DeleteBucketPolicy,
+  GetBucketPolicyStatus.
+- **Bucket configuration** ([above](#bucket-configuration)):
+  PutBucketTagging, GetBucketTagging, DeleteBucketTagging; PutBucketCors,
+  GetBucketCors, DeleteBucketCors and CORS preflights; PutPublicAccessBlock,
+  GetPublicAccessBlock, DeletePublicAccessBlock; PutBucketOwnershipControls,
+  GetBucketOwnershipControls, DeleteBucketOwnershipControls; PutBucketAcl,
+  GetBucketAcl, PutObjectAcl, GetObjectAcl; PutBucketEncryption,
+  GetBucketEncryption, DeleteBucketEncryption.
 - **Listing:** ListObjectsV2 and ListObjects (v1), with prefix, delimiter,
   paging and `encoding-type=url`.
 - **Objects:** PutObject (including aws-chunked streaming uploads), GetObject
@@ -411,7 +712,7 @@ any origin, and response headers such as `ETag` are exposed.
     ghcr.io/tulehq/object-store:0.3.1
   docker run -d --name new -p 9001:9000 -v s3data-new:/data \
     -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
-    ghcr.io/tulehq/object-store:0.8.0
+    ghcr.io/tulehq/object-store:0.9.0
   export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1
   for b in $(aws s3 ls --endpoint-url http://localhost:9000 | awk '{print $3}'); do
     aws s3 sync "s3://$b" "copy/$b" --endpoint-url http://localhost:9000
@@ -462,16 +763,23 @@ any origin, and response headers such as `ETag` are exposed.
   URL is a bearer grant over every key in the bucket for that operation:
   any keys to delete, or any of the upload's parts to complete.
 - **Not implemented** (requests return `501 NotImplemented`): enabling
-  versioning, tagging, ACLs, bucket policy status, public access blocks,
-  CORS and lifecycle configuration, object lock, UploadPartCopy, and browser POST-policy uploads.
-- **Accepted but ignored:** server-side encryption headers,
-  `x-amz-copy-source-if-*` conditions, and additional checksums
-  (`x-amz-checksum-*`, neither verified nor returned).
+  versioning, object tagging, lifecycle configuration, object lock,
+  UploadPartCopy, and browser POST-policy uploads.
+- **Accepted but ignored:** `x-amz-copy-source-if-*` conditions, a copy
+  source's SSE-C headers (`x-amz-copy-source-server-side-encryption-customer-*`),
+  the SSE-C headers of a read, and additional checksums
+  (`x-amz-checksum-*`, neither verified nor returned). SSE-S3, SSE-KMS and
+  SSE-C headers and bucket defaults on writes are validated, recorded and
+  reported, but nothing is encrypted, and reads of an SSE-C object do not
+  need its key; `x-amz-server-side-encryption` on a read of any other
+  object is refused with `400 InvalidArgument`
+  ([Default encryption](#default-encryption)). ACLs are stored and
+  reported, never evaluated ([Object Ownership and ACLs](#object-ownership-and-acls)).
 - HeadObject ignores conditional request headers.
 
 ## Release and module
 
 This page follows the object-store README at
-[v0.8.0](https://github.com/tulehq/object-store/blob/v0.8.0/README.md), released as
-`ghcr.io/tulehq/object-store:0.8.0`. Its Go module is `tule.dev/object-store`, with the
+[v0.9.0](https://github.com/tulehq/object-store/blob/v0.9.0/README.md), released as
+`ghcr.io/tulehq/object-store:0.9.0`. Its Go module is `tule.dev/object-store`, with the
 source at [github.com/tulehq/object-store](https://github.com/tulehq/object-store).
