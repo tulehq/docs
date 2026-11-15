@@ -25,14 +25,14 @@ a resource when both allow it, as on AWS.
 
 | Service | Stands in for | Image | Port |
 |---|---|---|---|
-| [object-store](/object-store/) | S3 | `ghcr.io/tulehq/object-store:0.12.0` | 9000 |
+| [object-store](/object-store/) | S3 | `ghcr.io/tulehq/object-store:0.13.0` | 9000 |
 | [secret-store](/secret-store/) | Secrets Manager | `ghcr.io/tulehq/secret-store:0.6.0` | 9010 |
 | [accounts](/accounts/) | Organizations | `ghcr.io/tulehq/accounts:0.5.0` | 9020 |
-| [identity](/identity/) | IAM and STS | `ghcr.io/tulehq/identity:0.5.0` | 9030 |
+| [identity](/identity/) | IAM and STS | `ghcr.io/tulehq/identity:0.5.1` | 9030 |
 | [mailbox](/mailbox/) | SES v2 (stores mail, never delivers it) | `ghcr.io/tulehq/mailbox:0.4.0` | 9040 |
-| [queues](/queues/) | SQS, standard and FIFO | `ghcr.io/tulehq/queues:0.5.0` | 9050 |
-| [functions](/functions/) | Lambda, container images run through Docker | `ghcr.io/tulehq/functions:0.5.0` | 9060, 9061 |
-| [console](/console/) | The AWS console: a web UI over the other services | `ghcr.io/tulehq/console:0.3.7` | 9070 |
+| [queues](/queues/) | SQS, standard and FIFO | `ghcr.io/tulehq/queues:0.6.0` | 9050 |
+| [functions](/functions/) | Lambda, container images run through Docker | `ghcr.io/tulehq/functions:0.6.1` | 9060, 9061 |
+| [console](/console/) | The AWS console: a web UI over the other services | `ghcr.io/tulehq/console:0.3.8` | 9070 |
 
 The Go libraries the services share are [sigv4](/sigv4/) (SigV4 verification)
 and [policy](/policy/) (IAM policy evaluation).

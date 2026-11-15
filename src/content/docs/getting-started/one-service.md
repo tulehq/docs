@@ -13,7 +13,7 @@ their own ports.
 docker run --rm -p 9000:9000 -v s3data:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
   -e TULE_Storage_Buckets=uploads,assets \
-  ghcr.io/tulehq/object-store:0.12.0
+  ghcr.io/tulehq/object-store:0.13.0
 ```
 
 - `TULE_Auth_AccessKeyID` and `TULE_Auth_SecretAccessKey` are the one key the
@@ -64,7 +64,7 @@ docker run --rm -p 9020:9020 -v accountsdata:/data \
 docker run --rm -p 9030:9030 -v identitydata:/data \
   -e TULE_Auth_AccessKeyID=AKIAIOSFODNN7EXAMPLE \
   -e TULE_Auth_SecretAccessKey=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
-  ghcr.io/tulehq/identity:0.5.0
+  ghcr.io/tulehq/identity:0.5.1
 
 docker run --rm -p 9040:9040 -v mailboxdata:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
@@ -72,7 +72,7 @@ docker run --rm -p 9040:9040 -v mailboxdata:/data \
 
 docker run --rm -p 9050:9050 -v queuesdata:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
-  ghcr.io/tulehq/queues:0.5.0
+  ghcr.io/tulehq/queues:0.6.0
 ```
 
 functions needs the Docker socket; see [functions](/functions/#running-it).
