@@ -13,7 +13,7 @@ their own ports.
 docker run --rm -p 9000:9000 -v s3data:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
   -e TULE_Storage_Buckets=uploads,assets \
-  ghcr.io/tulehq/object-store:0.11.0
+  ghcr.io/tulehq/object-store:0.12.0
 ```
 
 - `TULE_Auth_AccessKeyID` and `TULE_Auth_SecretAccessKey` are the one key the
