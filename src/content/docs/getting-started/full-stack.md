@@ -1,19 +1,47 @@
 ---
 title: The full stack
-description: Run every Tule service and the console together with Docker Compose.
+description: Run every Tule service and the console together with the tule CLI, or with Docker Compose.
 ---
 
-The compose file [below](#the-file) runs every service and the console,
-wired together: one root key everywhere, every service pointed at identity
-so the keys identity issues work on all of them, each held to its IAM
-policies and to the resource policies of what it acts on, and the console
-pointed at each. It is the console's
-[`compose.yaml`](https://github.com/tulehq/console/blob/v0.3.10/compose.yaml)
-at v0.3.10, with every service pinned to its current release, object-store
+The [`tule` CLI](/cli/) runs every service and the console, wired together:
+one root key everywhere, every service pointed at identity so the keys
+identity issues work on all of them, each held to its IAM policies and to
+the resource policies of what it acts on, and the console pointed at each.
+For an app that picks its services in its own compose file, the compose
+file [below](#the-file) runs the stack with Docker Compose alone. It is
+the console's
+[`compose.yaml`](https://github.com/tulehq/console/blob/v0.3.11/compose.yaml)
+at v0.3.11, with every service pinned to its current release, object-store
 pointed at queues and functions to deliver bucket event notifications, and
 secret-store pointed at functions for rotation.
 
-## Start it
+## Start it with tule
+
+[Install `tule`](/cli/#install), then start the stack and point the shell at
+it:
+
+```sh
+tule up
+eval "$(tule env)"
+tule status
+```
+
+`tule up` starts the default set, every service but functions, and waits
+until its services are healthy. functions mounts the Docker socket, which is
+root-equivalent on the host, so it runs only when named; `up` finds the
+group that owns the socket on the Docker daemon itself:
+
+```sh
+tule up functions
+```
+
+`tule status` shows each service's host address; open the console's and
+[sign in](/getting-started/console/) with the root key ([below](#what-runs)).
+`tule down` removes the stack and keeps its data in its volumes;
+`tule down --volumes` also deletes the data. See [the CLI](/cli/) for
+`tule.yaml`, `tule env` in fish and PowerShell, and the other commands.
+
+## Start it with Docker Compose
 
 Save [the file](#the-file) as `compose.yaml` and start the stack:
 
@@ -65,8 +93,11 @@ on AWS; see [Cross-account access](/guides/identity/#cross-account-access).
 | secret-store | `ghcr.io/tulehq/secret-store:0.6.1` | 9010 |
 | mailbox | `ghcr.io/tulehq/mailbox:0.4.1` | 9040 |
 | queues | `ghcr.io/tulehq/queues:0.6.1` | 9050 |
-| functions (profile `functions`) | `ghcr.io/tulehq/functions:0.7.0` | 9060, and 9061 for the Runtime API |
-| console | `ghcr.io/tulehq/console:0.3.10` | 9070 |
+| functions (profile `functions`) | `ghcr.io/tulehq/functions:0.7.0` | 9060 |
+| console | `ghcr.io/tulehq/console:0.3.11` | 9070 |
+
+The table is the compose file's; `tule services` lists each service's image,
+tested version and default ports as `tule` runs them.
 
 Each service keeps its data on a named volume. The console holds no data.
 
@@ -152,9 +183,13 @@ services:
     environment:
       <<: [*root-key, *identity-endpoint]
       TULE_Functions_QueuesEndpoint: http://queues:9050
-    # The function containers reach the Runtime API as
-    # host.docker.internal:9061, so it is published on the same port.
-    ports: ["9060:9060", "9061:9061"]
+      # Function containers join this project's default network, so they
+      # reach the Runtime API and the other services by service name, and
+      # the Runtime API port stays off the host.
+      TULE_Functions_ContainerNetwork: ${COMPOSE_PROJECT_NAME}_default
+      TULE_Functions_RuntimeAPIHost: functions
+      TULE_Functions_RuntimeAPIBind: 0.0.0.0
+    ports: ["9060:9060"]
     volumes:
       - functionsdata:/data
       - /var/run/docker.sock:/var/run/docker.sock
@@ -163,7 +198,7 @@ services:
     group_add: ["${DOCKER_GID:-0}"]
 
   console:
-    image: ghcr.io/tulehq/console:0.3.10
+    image: ghcr.io/tulehq/console:0.3.11
     depends_on:
       identity: {condition: service_healthy}
       accounts: {condition: service_healthy}

@@ -56,6 +56,11 @@ export const modules = [
 		description: 'A web console for every Tule service.',
 	},
 	{
+		name: 'cli',
+		repo: 'https://github.com/tulehq/cli',
+		description: 'The tule command, which runs a local stack of Tule services with Docker Compose.',
+	},
+	{
 		name: 'policy',
 		repo: 'https://github.com/tulehq/policy',
 		description: 'IAM policy parsing and evaluation.',
