@@ -1,6 +1,6 @@
 ---
 title: object-store
-description: "object-store 0.11.0: a local stand-in for S3."
+description: "object-store 0.12.0: a local stand-in for S3."
 ---
 
 An S3-compatible object store that keeps objects on the local filesystem. It is
@@ -19,7 +19,7 @@ With Docker:
 docker run --rm -p 9000:9000 -v s3data:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
   -e TULE_Storage_Buckets=uploads,assets \
-  ghcr.io/tulehq/object-store:0.11.0
+  ghcr.io/tulehq/object-store:0.12.0
 ```
 
 The image is based on Alpine, so `docker exec -it <container> sh` gives you a
@@ -266,6 +266,7 @@ lists for it, on `arn:aws:s3:::<bucket>` or `arn:aws:s3:::<bucket>/<key>`:
 | PutObjectTagging, GetObjectTagging, DeleteObjectTagging | `s3:PutObjectTagging`, `s3:GetObjectTagging`, `s3:DeleteObjectTagging`; with `?versionId`, `s3:PutObjectVersionTagging`, `s3:GetObjectVersionTagging`, `s3:DeleteObjectVersionTagging` | object |
 | GetObjectAttributes | `s3:GetObject`, then `s3:GetObjectAttributes`; with `?versionId`, `s3:GetObjectVersion`, then `s3:GetObjectVersionAttributes` | object |
 | PutBucketEncryption, DeleteBucketEncryption; GetBucketEncryption | `s3:PutEncryptionConfiguration`; `s3:GetEncryptionConfiguration` | bucket |
+| PutBucketLifecycleConfiguration, DeleteBucketLifecycle; GetBucketLifecycleConfiguration | `s3:PutLifecycleConfiguration`; `s3:GetLifecycleConfiguration` | bucket |
 
 A write's headers add actions on the same resource. CreateBucket with an
 `x-amz-object-ownership` header also needs `s3:PutBucketOwnershipControls`,
@@ -304,8 +305,14 @@ as both, as the GetObject API reference asks `s3:GetObjectVersion` for a
 specific version. HeadObject of a version needs `s3:GetObjectVersion` too,
 as its API reference asks "the relevant read object (or version)
 permission", where the Service Authorization Reference lists only
-`s3:GetObject` for it. PutBucketVersioning is not limited to the owner's
-account, as on S3, where only MFA delete is, and MFA delete is refused
+`s3:GetObject` for it. The deprecated PutBucketLifecycle and
+GetBucketLifecycle share the request lines of
+PutBucketLifecycleConfiguration and GetBucketLifecycleConfiguration, and the
+Service Authorization Reference authorizes them with the same actions, so
+they are served and evaluated as those ([Lifecycle](#lifecycle)). The
+lifecycle operations are not limited to the owner's account, as on S3,
+where the owner can grant others access with an access policy.
+PutBucketVersioning is not limited to the owner's account, as on S3, where only MFA delete is, and MFA delete is refused
 ([Versioning](#versioning)).
 
 A GetObject or HeadObject is answered
@@ -435,6 +442,45 @@ for:
   only once the caller may read them; UploadPartCopy, which copies no tags,
   checks the destination first. S3 does not document its order, which
   decides the action a doubly denied copy names.
+
+### Changes in v0.12.0
+
+- Lifecycle configuration is served:
+  PutBucketLifecycleConfiguration, GetBucketLifecycleConfiguration and
+  DeleteBucketLifecycle, which answered `501 NotImplemented`, and the
+  deprecated PutBucketLifecycle and GetBucketLifecycle on the same request
+  lines. Each bucket's rules are applied in the background: current
+  versions expire, noncurrent versions and expired delete markers are
+  removed, and incomplete multipart uploads are aborted, without a
+  principal and whatever the bucket policy says. Transitions are accepted,
+  stored and answered, and never applied ([Lifecycle](#lifecycle)). The
+  three operations are evaluated as `s3:PutLifecycleConfiguration` and
+  `s3:GetLifecycleConfiguration`.
+- PutObject, CopyObject, CompleteMultipartUpload, GetObject
+  and HeadObject answer `x-amz-expiration` for an object a lifecycle rule
+  expires, and CreateMultipartUpload and ListParts answer
+  `x-amz-abort-date` and `x-amz-abort-rule-id` for an upload a rule aborts
+  ([Lifecycle](#lifecycle)).
+- A multipart upload is created under a temporary name and
+  renamed into place once its manifest is written, and an upload is
+  removed manifest first, so an upload directory without a manifest is
+  never an upload. Such directories, which only a crash leaves, are
+  removed at start and when their bucket is deleted.
+- **Fix:** an AbortMultipartUpload racing a CompleteMultipartUpload of a
+  versioned bucket makes the completion answer `404 NoSuchUpload`, as one
+  after the abort does. It could fail with `500 InternalError`.
+- **Data:** a version's manifest entry records when the version became
+  noncurrent (`noncurrentSince`), which NoncurrentVersionExpiration
+  counts from. Entries written by earlier versions have none, and count
+  from the LastModified of the version above them, its successor.
+- **Downgrade:** v0.11.0 and earlier ignore `noncurrentSince` and drop it
+  from the manifests they rewrite, after which v0.12.0 counts those
+  entries from their successor's LastModified again. They ignore
+  lifecycle configurations, so rules stop applying, and leave a bucket's
+  configuration file behind when they delete the bucket. A configuration
+  is stored with the generation of the bucket it was put in, and one
+  left from an earlier bucket of the same name is neither answered nor
+  applied after upgrading again.
 
 ### Changes in v0.11.0
 
@@ -1103,6 +1149,236 @@ Where AWS is silent or contradicts itself, these are the choices:
 Version IDs are 26 characters of `0-9A-V`, URL-safe and opaque, ordered by
 the order versions were written.
 
+## Lifecycle
+
+PutBucketLifecycleConfiguration (`PUT /<bucket>?lifecycle`) stores a
+bucket's lifecycle configuration, replacing any it had ("this will
+overwrite an existing lifecycle configuration", its API reference), and
+answers `200` with no body and `x-amz-transition-default-minimum-object-size`:
+the request's value, `all_storage_classes_128K` or
+`varies_by_storage_class`, or `all_storage_classes_128K` for a request
+without one. GetBucketLifecycleConfiguration answers the configuration
+with that header, or `404 NoSuchLifecycleConfiguration`, "The lifecycle
+configuration does not exist"; DeleteBucketLifecycle answers `204`, also
+for a bucket without one. The deprecated PutBucketLifecycle and
+GetBucketLifecycle share these request lines and are served as these
+operations: a rule written with a top-level `Prefix` and no `Filter` is
+kept and answered in that form. As with the other bucket configurations
+([Bucket configuration](#bucket-configuration)), the Put is evaluated
+before its document is read, `x-amz-expected-bucket-owner` is taken, and
+`Content-MD5` and the checksum headers are accepted and ignored. A
+document over 1 MiB is refused with `400 MaxMessageLengthExceeded`; S3
+documents no limit, and 1 MiB, which fits 1,000 rules, is a choice. The
+configuration is stored with the generation of the bucket it was put in,
+and deleted with the bucket.
+
+GET answers the configuration as stored: each rule in the form it was put
+in, a rule put without an `ID` with the one generated for it, and dates
+as `2006-01-02T15:04:05.000Z`.
+
+**Validation.** A document that is not XML, has another root, repeats an
+element the schema allows once, or holds a number, boolean or date that
+does not parse is `400 MalformedXML`; so is a configuration without a
+rule. The constraints below are S3's, from the
+PutBucketLifecycleConfiguration and data type API references and the S3
+User Guide ("Lifecycle configuration elements", "Examples of S3 Lifecycle
+configurations"). Their codes and messages are choices, except where
+noted, and some messages are the ones S3 or S3-compatible servers were
+seen to answer. Rules are checked in document order, then across rules,
+and the first error is answered.
+
+- At most 1,000 rules (`InvalidRequest`).
+- An `ID` of at most 255 characters, unique in the configuration
+  (`InvalidArgument`); a `Status` of `Enabled` or `Disabled`, and exactly
+  one of `Filter` and a top-level `Prefix` (`MalformedXML`); and not
+  rules of both forms in one configuration (`InvalidRequest`, "Filter
+  element can only be used in Lifecycle V2.").
+- A `Filter` with at most one of `Prefix`, `Tag`, `ObjectSizeGreaterThan`,
+  `ObjectSizeLessThan` and `And`, and an `And` of two or more predicates
+  and one `Prefix` at most (`MalformedXML`); tag keys unique in an `And`
+  (`InvalidArgument`), each tag within the object tag limits (`InvalidTag`,
+  as [Object tagging](#object-tagging) answers it); `ObjectSizeGreaterThan`
+  of 0 or more, `ObjectSizeLessThan` of 1 or more, both at most 50 TB,
+  read as 50 TiB, and the first less than the second (`InvalidArgument`).
+- At least one action (`MalformedXML`).
+- An `Expiration` with `Days`, `Date` or `ExpiredObjectDeleteMarker`, not
+  both `Days` and `Date` (`MalformedXML`), and not
+  `ExpiredObjectDeleteMarker` with either (`InvalidArgument`, the
+  sentence of the LifecycleExpiration API reference); `Days` of 1 or
+  more; every `Date` at midnight UTC (`InvalidArgument`).
+- No `ExpiredObjectDeleteMarker` or `AbortIncompleteMultipartUpload` in a
+  rule whose filter uses tags (`InvalidRequest`).
+- `DaysAfterInitiation` of 1 or more; a `NoncurrentVersionExpiration`
+  with `NoncurrentDays` (`MalformedXML`) of 1 or more;
+  `NewerNoncurrentVersions` from 1 to 100 (`InvalidArgument`), and only in
+  a rule with a `Filter`: `400 InvalidRequest`, the error the User Guide
+  documents.
+- A `Transition` or `NoncurrentVersionTransition` with a storage class S3
+  lists (`GLACIER`, `STANDARD_IA`, `ONEZONE_IA`, `INTELLIGENT_TIERING`,
+  `DEEP_ARCHIVE`, `GLACIER_IR`), a `Transition` with exactly one of
+  `Days` and `Date` (`MalformedXML`), `Days` and `NoncurrentDays` of 0 or
+  more (`InvalidArgument`), and not `Days` in a rule's `Expiration` or one
+  `Transition` with `Date` in another ("you can't use both Date and Days
+  in the same rule", `InvalidArgument`).
+- `x-amz-transition-default-minimum-object-size` of one of its two values
+  (`InvalidArgument`).
+
+Accepted: an empty `Filter` or `Prefix`, which matches every object;
+`ExpiredObjectDeleteMarker` false, which does nothing; noncurrent actions
+in a bucket never versioned, where they have no effect; and elements S3
+does not define, which are ignored. Not enforced, as AWS documents no
+error for them: the 30-day minimum before a transition to `STANDARD_IA` or
+`ONEZONE_IA`, Expiration days exceeding Transition days, and the
+minimum-duration chains of "Transitioning objects using Amazon S3
+Lifecycle".
+
+**How rules apply.** A rule applies to the objects it matches: it is
+`Enabled`, the key has its prefix, the object has each of its tags with
+the same value (others are allowed), and its size is strictly between its
+bounds. A delete marker has size 0 and no tags. A Days rule makes an
+object eligible at the midnight UTC after its creation time plus the
+days: "created on 1/15/2014 10:30 AM UTC" with 3 days, "the expiration
+date would be calculated as 1/19/2014 00:00 UTC" (S3 User Guide). A Date
+rule makes every matching object eligible from the date, also those
+created after it.
+
+- **Expiration** applies to current versions. In a bucket never
+  versioned, the object is deleted and cannot be recovered. In an Enabled
+  bucket, a delete marker is added and the version kept as noncurrent; a
+  current delete marker with other versions is left alone. In a Suspended
+  bucket, a `null` delete marker is added, which replaces the key's `null`
+  version, current or not, and a current version that is not `null` is
+  kept as noncurrent ("This delete marker replaces any object version
+  with a null version ID", "Expiring objects"). A marker lifecycle adds is
+  dated midnight UTC of the day it is added.
+- **NoncurrentVersionExpiration** permanently deletes a noncurrent version
+  or delete marker its `NoncurrentDays` after it became noncurrent, which
+  is when its successor was written, keeping the `NewerNoncurrentVersions`
+  newest noncurrent versions.
+- **ExpiredObjectDeleteMarker** true removes a delete marker that is the
+  key's only version, and so the key. A Days rule removes such a marker
+  once the marker is old enough, as the User Guide notes.
+- **AbortIncompleteMultipartUpload** aborts the uploads whose key has the
+  rule's prefix `DaysAfterInitiation` after they were created, existing
+  ones included. A completed upload is not affected.
+- **Transition** and **NoncurrentVersionTransition** are accepted, stored
+  and answered by GET, and never applied: there are no storage classes
+  here, and every object stays `STANDARD`.
+
+The rules apply to existing objects as well as new ones. When several
+rules match a version, a permanent deletion wins over adding a marker,
+and the earliest action wins. Tags are read when the rule is applied.
+
+**Response headers.** PutObject, CopyObject and CompleteMultipartUpload
+answer `x-amz-expiration` for the object they write, and GetObject and
+HeadObject for a key's current version, also when it is named by
+`versionId`, when an enabled Expiration by Days or Date matches it:
+`expiry-date="Sun, 19 Jan 2014 00:00:00 GMT", rule-id="logs"`, the
+midnight it is eligible at and the rule's ID, URL-encoded ("The value of
+the rule-id is URL-encoded.", GetObject API reference). A Date already
+past is answered as it is. A noncurrent version answers none, and so do
+rules with only NoncurrentVersionExpiration or ExpiredObjectDeleteMarker,
+and Disabled rules. CreateMultipartUpload and ListParts answer
+`x-amz-abort-date`, the HTTP date the upload is eligible to be aborted
+at, and `x-amz-abort-rule-id`, the rule's ID, when an enabled
+AbortIncompleteMultipartUpload rule's prefix matches the upload's key.
+The configuration is read on each of these requests. One that cannot be
+read or decoded is logged at Warn with its bucket, and the request is
+answered without these headers.
+
+The rules are applied in the background, as S3 does: without a principal,
+so no identity policy, bucket policy, ACL or Block Public Access setting
+is evaluated, and a bucket policy denying `s3:DeleteObject` does not stop
+them ("You can't use a bucket policy to prevent deletions or transitions
+by an S3 Lifecycle rule.", "Expiring objects"). Each action is logged at
+Info with `actor=lifecycle`, the bucket, key, version and rule, and the
+operation name of S3's server access log: `S3.EXPIRE.OBJECT`,
+`S3.CREATE.DELETEMARKER` or `S3.DELETE.UPLOAD`.
+
+**Where AWS is silent**, or contradicts itself, this is what the server
+does:
+
+1. Eligibility is the next midnight UTC strictly after the creation time
+   plus the days, so a time that lands on midnight moves to the next one.
+2. The rules are checked every minute, and each bucket with a
+   configuration is swept at most once per UTC day, and once more after
+   its configuration changes or it is deleted and created again. S3
+   "doesn't guarantee a completion time".
+3. `DaysAfterInitiation` rounds as Days do, from the upload's creation.
+4. A delete marker lifecycle adds is dated midnight UTC of that day, but
+   never earlier than the version it covers, so listings stay in order.
+5. A version became noncurrent when the version or marker above it was
+   written, which is recorded; for a version written before this was
+   recorded, it is its successor's LastModified.
+6. `NewerNoncurrentVersions` N keeps exactly the N newest noncurrent
+   versions, as the API reference says ("how many noncurrent versions
+   Amazon S3 will retain"), not N+1, as the User Guide's example reads.
+7. Noncurrent delete markers count toward N, and expire as noncurrent
+   versions do.
+8. `ExpiredObjectDeleteMarker` removes a marker in the same sweep that
+   removed the key's last noncurrent version, but never a marker the same
+   sweep added: that one stays until a later day's sweep.
+9. `AbortIncompleteMultipartUpload` matches by prefix only; size bounds do
+   not apply to an upload.
+10. Transitions are never applied, and do not delay a delete marker,
+    where S3 gives a transition precedence over one.
+11. `x-amz-expiration` is computed from the configuration, for a key's
+    current version only, and the earliest matching expiry wins. Its
+    `rule-id` is URL-encoded, as the API references' text says, although
+    HeadObject's sample shows one with a raw space.
+12. `x-amz-transition-default-minimum-object-size` is answered by the Put
+    and the Get only, as no other operation lists it, and defaults to
+    `all_storage_classes_128K`, the value S3 gives a configuration put
+    without it since September 2024.
+13. A rule without an `ID`, or with an empty one, gets a generated one,
+    which GET answers.
+14. Error codes and messages S3 does not document are the choices of the
+    validation list above.
+15. An `And` with one predicate is refused (`MalformedXML`), as it needs
+    "two or more predicates".
+16. A configuration mixing rules with a top-level `Prefix` and rules with
+    a `Filter` is refused (`InvalidRequest`).
+17. The document is limited to 1 MiB.
+18. Tags are read when a rule is applied, under the key's lock, so a
+    concurrent PutObjectTagging is applied wholly before or after.
+19. `DaysAfterInitiation` of 0 is refused, as Days and `NoncurrentDays`
+    must be positive.
+20. A `NoncurrentVersionExpiration` without `NoncurrentDays` is refused
+    (`MalformedXML`).
+21. A key held by a write is skipped and retried a second later, never
+    waited for; found locked 60 times in one sweep, it is logged once at
+    Warn ("skipped for this sweep") and left for the next sweep. Uploads
+    likewise.
+22. A configuration stored in an earlier bucket of the same name, which
+    v0.11.0 and earlier leave when they delete a bucket, is neither
+    answered nor applied.
+23. Lifecycle actions have no principal and are not authorized.
+24. A sweep reads the configuration once per tick, so a configuration
+    deleted or changed during one can still apply for that tick; a new
+    one applies from the next tick.
+25. The time lifecycle reads is the one stored timestamps use
+    (Last-Modified, delete markers, upload creation); the HTTP `Date`
+    header and signature checks use the system's.
+26. A Days rule removes a delete marker that is its key's only version
+    once the marker itself is eligible by those days.
+27. In a versioned bucket, expiration adds a marker on the date an
+    unversioned bucket would delete the object.
+28. Between rules for one version, a permanent deletion beats adding a
+    marker, and the earliest expiry wins ("if two expiration policies
+    overlap, the shorter expiration policy is honored").
+29. Unknown elements are ignored, as in the other configurations.
+30. Validation goes in document order, and the first error is answered.
+31. A key or upload whose lifecycle action fails is retried at the next
+    tick; at its third failure in a row in one sweep it is logged once at
+    Warn ("skipped for this sweep") and left for the next sweep, so the
+    rest of the bucket is swept.
+32. Each tick does at most 1,000 units of work, shared between the
+    buckets in name order, starting after the bucket the previous tick
+    stopped in, so a large bucket does not hold the others back.
+
+A sweep holds its bucket for at most 64 keys or 200 ms at a time, with a
+pause between, so a DeleteBucket is never held up by it.
+
 ## Health checks
 
 `GET /_health` (liveness) and `GET /_ready` (readiness) answer without a
@@ -1159,6 +1435,11 @@ bucket are refused, as on S3.
   GetBucketOwnershipControls, DeleteBucketOwnershipControls; PutBucketAcl,
   GetBucketAcl, PutObjectAcl, GetObjectAcl; PutBucketEncryption,
   GetBucketEncryption, DeleteBucketEncryption.
+- **Lifecycle** ([above](#lifecycle)): PutBucketLifecycleConfiguration,
+  GetBucketLifecycleConfiguration and DeleteBucketLifecycle, and the
+  deprecated PutBucketLifecycle and GetBucketLifecycle, with expiration,
+  noncurrent version expiration, expired delete marker removal and the
+  abort of incomplete multipart uploads applied in the background.
 - **Listing:** ListObjectsV2 and ListObjects (v1), with prefix, delimiter,
   paging and `encoding-type=url`; ListObjectVersions, with prefix,
   delimiter, key and version-id markers and `encoding-type=url`.
@@ -1168,7 +1449,8 @@ bucket are refused, as on S3.
   `x-amz-copy-source-if-*` conditions), DeleteObject, DeleteObjects,
   GetObjectAttributes ([above](#object-attributes)), and `?versionId` on
   GetObject, HeadObject and DeleteObject and `VersionId` on DeleteObjects
-  ([above](#versioning)).
+  ([above](#versioning)). PutObject, CopyObject, GetObject and HeadObject
+  answer `x-amz-expiration` ([above](#lifecycle)).
 - **Object tagging** ([above](#object-tagging)): PutObjectTagging,
   GetObjectTagging, DeleteObjectTagging, `x-amz-tagging` on PutObject,
   CreateMultipartUpload and CopyObject, and `x-amz-tagging-count` on
@@ -1176,7 +1458,9 @@ bucket are refused, as on S3.
 - **Multipart uploads:** CreateMultipartUpload, UploadPart, UploadPartCopy
   ([above](#part-copies-and-copy-conditions)), CompleteMultipartUpload,
   AbortMultipartUpload, ListParts, ListMultipartUploads. ETags and the 5
-  MiB minimum part size follow S3.
+  MiB minimum part size follow S3. CreateMultipartUpload and ListParts
+  answer `x-amz-abort-date` and `x-amz-abort-rule-id`, and
+  CompleteMultipartUpload `x-amz-expiration` ([above](#lifecycle)).
 - **Conditional writes:** `If-None-Match: *` and `If-Match` on PutObject,
   CopyObject and CompleteMultipartUpload.
 - **Presigned URLs** for GET and PUT.
@@ -1205,7 +1489,7 @@ bucket are refused, as on S3.
     ghcr.io/tulehq/object-store:0.3.1
   docker run -d --name new -p 9001:9000 -v s3data-new:/data \
     -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
-    ghcr.io/tulehq/object-store:0.11.0
+    ghcr.io/tulehq/object-store:0.12.0
   export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1
   for b in $(aws s3 ls --endpoint-url http://localhost:9000 | awk '{print $3}'); do
     aws s3 sync "s3://$b" "copy/$b" --endpoint-url http://localhost:9000
@@ -1256,7 +1540,9 @@ bucket are refused, as on S3.
   URL is a bearer grant over every key in the bucket for that operation:
   any keys to delete, or any of the upload's parts to complete.
 - **Not implemented** (requests return `501 NotImplemented`): MFA delete,
-  lifecycle configuration, object lock, and browser POST-policy uploads.
+  object lock, and browser POST-policy uploads.
+- **Lifecycle transitions are never applied**, so no object changes
+  storage class ([Lifecycle](#lifecycle)).
 - **Version listings name no owner.** ListObjectVersions answers no
   `Owner` for a version or delete marker, as ListObjects answers none
   here.
@@ -1287,8 +1573,6 @@ bucket are refused, as on S3.
 ## Release and module
 
 This page follows the object-store README at
-[v0.11.0](https://github.com/tulehq/object-store/blob/v0.11.0/README.md), released as
-`ghcr.io/tulehq/object-store:0.11.0`. Its "Not implemented" bullet is given
-here as the README corrected it after the release, without the versioned
-subresources v0.11.0 serves. Its Go module is `tule.dev/object-store`, with the
+[v0.12.0](https://github.com/tulehq/object-store/blob/v0.12.0/README.md), released as
+`ghcr.io/tulehq/object-store:0.12.0`. Its Go module is `tule.dev/object-store`, with the
 source at [github.com/tulehq/object-store](https://github.com/tulehq/object-store).
