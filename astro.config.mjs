@@ -34,7 +34,7 @@ export default defineConfig({
 			head: goHead,
 			plugins: [starlightLinksValidator()],
 			// Every module in src/modules.mjs has a page at /<name>/, listed
-			// under Services or Libraries; scripts/check-go-import.mjs fails
+			// under Tools, Services or Libraries; scripts/check-go-import.mjs fails
 			// when one is missing.
 			sidebar: [
 				{
@@ -44,6 +44,10 @@ export default defineConfig({
 						{ label: 'One service alone', link: '/getting-started/one-service/' },
 						{ label: 'Signing in to the console', link: '/getting-started/console/' },
 					],
+				},
+				{
+					label: 'Tools',
+					items: [{ label: 'tule CLI', link: '/cli/' }],
 				},
 				{
 					label: 'Guides',

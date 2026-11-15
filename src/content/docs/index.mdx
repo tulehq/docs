@@ -32,7 +32,7 @@ a resource when both allow it, as on AWS.
 | [mailbox](/mailbox/) | SES v2 (stores mail, never delivers it) | `ghcr.io/tulehq/mailbox:0.4.1` | 9040 |
 | [queues](/queues/) | SQS, standard and FIFO | `ghcr.io/tulehq/queues:0.6.1` | 9050 |
 | [functions](/functions/) | Lambda, container images run through Docker | `ghcr.io/tulehq/functions:0.7.0` | 9060, 9061 |
-| [console](/console/) | The AWS console: a web UI over the other services | `ghcr.io/tulehq/console:0.3.10` | 9070 |
+| [console](/console/) | The AWS console: a web UI over the other services | `ghcr.io/tulehq/console:0.3.11` | 9070 |
 
 The Go libraries the services share are [sigv4](/sigv4/) (SigV4 verification)
 and [policy](/policy/) (IAM policy evaluation).
@@ -48,7 +48,9 @@ as object-store for an app that only uses S3. See
 **The whole stack.** Every service and the console run together in Docker
 Compose, with one root key everywhere and every service pointed at identity,
 so the users, access keys and role sessions identity issues work on all of
-them, held to their policies. See [The full stack](/getting-started/full-stack/) and
+them, held to their policies. The [`tule` CLI](/cli/) starts it with
+`tule up`; an app that picks its services in its own compose file can use
+the compose file instead. See [The full stack](/getting-started/full-stack/) and
 [Identity and keys](/guides/identity/).
 
 ## Go modules

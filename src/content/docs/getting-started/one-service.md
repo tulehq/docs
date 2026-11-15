@@ -9,6 +9,18 @@ their own ports.
 
 ## Run object-store
 
+With the [`tule` CLI](/cli/), name the service:
+
+```sh
+tule up object-store
+eval "$(tule env)"
+```
+
+It runs object-store alone, with `tule`'s root key (the AWS documentation's
+example key unless `rootKey` in [`tule.yaml`](/cli/#tuleyaml) sets another),
+and `tule env` sets the endpoint, key and region variables for it. Or run
+the image with Docker:
+
 ```sh
 docker run --rm -p 9000:9000 -v s3data:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
