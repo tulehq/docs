@@ -1,6 +1,6 @@
 ---
 title: console
-description: "console 0.3.5: a web console for every Tule service."
+description: "console 0.3.6: a web console for every Tule service."
 ---
 
 A web console for [Tule](https://github.com/tulehq): browse every running
@@ -25,7 +25,7 @@ With Docker, pointed at services on the host:
 docker run --rm -p 9070:9070 \
   -e TULE_Console_ObjectStoreEndpoint=http://host.docker.internal:9000 \
   -e TULE_Console_MailboxEndpoint=http://host.docker.internal:9040 \
-  ghcr.io/tulehq/console:0.3.5
+  ghcr.io/tulehq/console:0.3.6
 ```
 
 Then open `http://localhost:9070` and sign in. The image is based on Alpine
@@ -45,7 +45,7 @@ accounts' 9020, identity's 9030, mailbox's 9040, queues' 9050 and functions'
 
 ### Every service together, in Docker Compose
 
-[`compose.yaml`](https://github.com/tulehq/console/blob/v0.3.5/compose.yaml) runs every service and the console, wired
+[`compose.yaml`](https://github.com/tulehq/console/blob/v0.3.6/compose.yaml) runs every service and the console, wired
 together: one root key everywhere, every service pointed at identity so the
 keys identity issues work on all of them, each held to its IAM policies, and
 the console pointed at each. It pins the current release of every service.
@@ -87,7 +87,7 @@ services:
     volumes: [accountsdata:/data]
 
   object-store:
-    image: ghcr.io/tulehq/object-store:0.10.1
+    image: ghcr.io/tulehq/object-store:0.11.0
     environment:
       <<: [*root-key, *identity-endpoint]
     ports: ["9000:9000"]
@@ -135,7 +135,7 @@ services:
     group_add: ["${DOCKER_GID:-0}"]
 
   console:
-    image: ghcr.io/tulehq/console:0.3.5
+    image: ghcr.io/tulehq/console:0.3.6
     depends_on:
       identity: {condition: service_healthy}
       accounts: {condition: service_healthy}
@@ -505,7 +505,7 @@ source mapping, each enabled or disabled from there.
   sign-in form has a token of its own in a cookie for the sign-in path.
 - **Static files** are embedded in the binary: one stylesheet, a small
   script, and htmx 2.0.11 from its npm package, unmodified, with its
-  license and checksums in [third_party/htmx](https://github.com/tulehq/console/tree/v0.3.5/third_party/htmx). Nothing is
+  license and checksums in [third_party/htmx](https://github.com/tulehq/console/tree/v0.3.6/third_party/htmx). Nothing is
   loaded from a CDN.
 
 ## Health checks
@@ -532,6 +532,6 @@ shows its service's own readiness.
 ## Release and module
 
 This page follows the console README at
-[v0.3.5](https://github.com/tulehq/console/blob/v0.3.5/README.md), released as
-`ghcr.io/tulehq/console:0.3.5`. Its Go module is `tule.dev/console`, with the
+[v0.3.6](https://github.com/tulehq/console/blob/v0.3.6/README.md), released as
+`ghcr.io/tulehq/console:0.3.6`. Its Go module is `tule.dev/console`, with the
 source at [github.com/tulehq/console](https://github.com/tulehq/console).
