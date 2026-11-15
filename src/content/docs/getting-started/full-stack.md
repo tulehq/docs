@@ -8,8 +8,8 @@ wired together: one root key everywhere, every service pointed at identity
 so the keys identity issues work on all of them, each held to its IAM
 policies and to the resource policies of what it acts on, and the console
 pointed at each. It is the console's
-[`compose.yaml`](https://github.com/tulehq/console/blob/v0.3.8/compose.yaml)
-at v0.3.8, with every service pinned to its current release, object-store
+[`compose.yaml`](https://github.com/tulehq/console/blob/v0.3.10/compose.yaml)
+at v0.3.10, with every service pinned to its current release, object-store
 pointed at queues and functions to deliver bucket event notifications, and
 secret-store pointed at functions for rotation.
 
@@ -59,14 +59,14 @@ on AWS; see [Cross-account access](/guides/identity/#cross-account-access).
 
 | Service | Image | Port on the host |
 |---|---|---|
-| identity | `ghcr.io/tulehq/identity:0.5.1` | 9030 |
-| accounts | `ghcr.io/tulehq/accounts:0.5.0` | 9020 |
-| object-store | `ghcr.io/tulehq/object-store:0.13.0` | 9000 |
-| secret-store | `ghcr.io/tulehq/secret-store:0.6.0` | 9010 |
-| mailbox | `ghcr.io/tulehq/mailbox:0.4.0` | 9040 |
-| queues | `ghcr.io/tulehq/queues:0.6.0` | 9050 |
-| functions (profile `functions`) | `ghcr.io/tulehq/functions:0.6.1` | 9060, and 9061 for the Runtime API |
-| console | `ghcr.io/tulehq/console:0.3.8` | 9070 |
+| identity | `ghcr.io/tulehq/identity:0.5.2` | 9030 |
+| accounts | `ghcr.io/tulehq/accounts:0.5.1` | 9020 |
+| object-store | `ghcr.io/tulehq/object-store:0.13.1` | 9000 |
+| secret-store | `ghcr.io/tulehq/secret-store:0.6.1` | 9010 |
+| mailbox | `ghcr.io/tulehq/mailbox:0.4.1` | 9040 |
+| queues | `ghcr.io/tulehq/queues:0.6.1` | 9050 |
+| functions (profile `functions`) | `ghcr.io/tulehq/functions:0.7.0` | 9060, and 9061 for the Runtime API |
+| console | `ghcr.io/tulehq/console:0.3.10` | 9070 |
 
 Each service keeps its data on a named volume. The console holds no data.
 
@@ -95,7 +95,7 @@ x-identity: &identity-endpoint
 
 services:
   identity:
-    image: ghcr.io/tulehq/identity:0.5.1
+    image: ghcr.io/tulehq/identity:0.5.2
     environment:
       <<: *root-key
       TULE_Identity_AccountsEndpoint: http://accounts:9020
@@ -103,14 +103,14 @@ services:
     volumes: [identitydata:/data]
 
   accounts:
-    image: ghcr.io/tulehq/accounts:0.5.0
+    image: ghcr.io/tulehq/accounts:0.5.1
     environment:
       <<: [*root-key, *identity-endpoint]
     ports: ["9020:9020"]
     volumes: [accountsdata:/data]
 
   object-store:
-    image: ghcr.io/tulehq/object-store:0.13.0
+    image: ghcr.io/tulehq/object-store:0.13.1
     environment:
       <<: [*root-key, *identity-endpoint]
       # Bucket notifications are delivered to queues and functions.
@@ -120,24 +120,23 @@ services:
     volumes: [objectdata:/data]
 
   secret-store:
-    image: ghcr.io/tulehq/secret-store:0.6.0
+    image: ghcr.io/tulehq/secret-store:0.6.1
     environment:
       <<: [*root-key, *identity-endpoint]
-      # RotateSecret invokes rotation functions here; it needs the
-      # functions profile.
+      # Rotation invokes rotation functions there.
       TULE_Store_FunctionsEndpoint: http://functions:9060
     ports: ["9010:9010"]
     volumes: [secretdata:/data]
 
   mailbox:
-    image: ghcr.io/tulehq/mailbox:0.4.0
+    image: ghcr.io/tulehq/mailbox:0.4.1
     environment:
       <<: [*root-key, *identity-endpoint]
     ports: ["9040:9040"]
     volumes: [maildata:/data]
 
   queues:
-    image: ghcr.io/tulehq/queues:0.6.0
+    image: ghcr.io/tulehq/queues:0.6.1
     environment:
       <<: [*root-key, *identity-endpoint]
       # Queue URLs name the host clients on this machine reach queues at.
@@ -146,7 +145,7 @@ services:
     volumes: [queuesdata:/data]
 
   functions:
-    image: ghcr.io/tulehq/functions:0.6.1
+    image: ghcr.io/tulehq/functions:0.7.0
     profiles: [functions]
     depends_on:
       queues: {condition: service_healthy}
@@ -164,7 +163,7 @@ services:
     group_add: ["${DOCKER_GID:-0}"]
 
   console:
-    image: ghcr.io/tulehq/console:0.3.8
+    image: ghcr.io/tulehq/console:0.3.10
     depends_on:
       identity: {condition: service_healthy}
       accounts: {condition: service_healthy}

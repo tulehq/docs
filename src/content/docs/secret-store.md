@@ -1,6 +1,6 @@
 ---
 title: secret-store
-description: "secret-store 0.6.0: a local stand-in for Secrets Manager."
+description: "secret-store 0.6.1: a local stand-in for Secrets Manager."
 ---
 
 An AWS Secrets Manager-compatible secret store that keeps secrets on the local
@@ -21,7 +21,7 @@ With Docker:
 docker run --rm -p 9010:9010 -v secretdata:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
   -e TULE_Store_Seed='{"myapp/config":{"Database":{"Host":"db.internal"}}}' \
-  ghcr.io/tulehq/secret-store:0.6.0
+  ghcr.io/tulehq/secret-store:0.6.1
 ```
 
 The image is based on Alpine, so `docker exec -it <container> sh` gives you a
@@ -86,9 +86,6 @@ or, when both services use identity, identity's root key. Configure the two
 services with the same key, as for identity. A call has no timeout of its
 own below 16 minutes, since a step runs as long as the function, up to its
 900-second limit.
-
-Set, it needs a fixed `TULE_Server_Port`: the server refuses to start with
-port `0` (see [Restarts](#restarts)).
 
 Unset, `RotateSecret` and `CancelRotateSecret` answer `501
 NotImplementedException` to every caller, without evaluating any policy;
@@ -313,6 +310,16 @@ since a rotation function calls secret-store as its execution role's
 session, not as Secrets Manager; the KMS, managed external secret and
 replication keys; permissions boundaries, session policies, SCPs and RCPs;
 and the check that a tag change leaves the caller its access.
+
+**Changes from v0.6.0:** `TULE_Server_Port=0` is accepted with
+`TULE_Store_FunctionsEndpoint`, which v0.6.0 refused at startup: rotations
+now wait for gas's event that the server listens, on whatever port it
+bound, rather than dialing the configured address ([Restarts](#restarts)).
+Their warning while they wait no longer names an address. The `server
+started` log is written once the port is bound, and its `addr` is the bound
+address (such as `[::]:9010`, with the port the system chose for port `0`)
+where it was the configured one (`:9010`); it also has a `tls` field. A port
+that cannot be bound is no longer logged as started (gas v0.10.0).
 
 **Changes from v0.5.0:** `RotateSecret` and `CancelRotateSecret` are served
 when `TULE_Store_FunctionsEndpoint` names a functions service v0.5.0 or
@@ -708,11 +715,9 @@ functions endpoint, every rotation it finds is resumed, from `createSecret`,
 at the attempt it was at, after its retry wait if it was in one; an attempt
 a shutdown interrupted does not count as failed. No rotation, resumed or
 new, invokes its function before the server listens: the rotation service
-dials the configured `TULE_Server_Host` and `TULE_Server_Port` until a
-connection is accepted, and only then invokes anything, logging a warning
-naming the address while it waits longer than 5 seconds, and again every 30
-seconds. That is why `TULE_Server_Port=0` is refused at startup when
-`TULE_Store_FunctionsEndpoint` is set. So a restart never leaves a secret in
+waits for gas's event that the server has bound its listener, and only then
+invokes anything, logging a warning while it waits longer than 5 seconds,
+and again every 30 seconds. So a restart never leaves a secret in
 progress for good: every rotation ends after its attempts. Started without a
 functions endpoint, the server leaves the recorded rotations as they are,
 for a later start with one. Files written before rotation was served load
@@ -823,6 +828,6 @@ out from a `ScheduleExpression`.
 ## Release and module
 
 This page follows the secret-store README at
-[v0.6.0](https://github.com/tulehq/secret-store/blob/v0.6.0/README.md), released as
-`ghcr.io/tulehq/secret-store:0.6.0`. Its Go module is `tule.dev/secret-store`, with the
+[v0.6.1](https://github.com/tulehq/secret-store/blob/v0.6.1/README.md), released as
+`ghcr.io/tulehq/secret-store:0.6.1`. Its Go module is `tule.dev/secret-store`, with the
 source at [github.com/tulehq/secret-store](https://github.com/tulehq/secret-store).

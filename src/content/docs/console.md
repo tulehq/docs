@@ -1,6 +1,6 @@
 ---
 title: console
-description: "console 0.3.8: a web console for every Tule service."
+description: "console 0.3.10: a web console for every Tule service."
 ---
 
 A web console for [Tule](https://github.com/tulehq): browse every running
@@ -25,7 +25,7 @@ With Docker, pointed at services on the host:
 docker run --rm -p 9070:9070 \
   -e TULE_Console_ObjectStoreEndpoint=http://host.docker.internal:9000 \
   -e TULE_Console_MailboxEndpoint=http://host.docker.internal:9040 \
-  ghcr.io/tulehq/console:0.3.8
+  ghcr.io/tulehq/console:0.3.10
 ```
 
 Then open `http://localhost:9070` and sign in. The image is based on Alpine
@@ -45,7 +45,7 @@ accounts' 9020, identity's 9030, mailbox's 9040, queues' 9050 and functions'
 
 ### Every service together, in Docker Compose
 
-[`compose.yaml`](https://github.com/tulehq/console/blob/v0.3.8/compose.yaml) runs every service and the console, wired
+[`compose.yaml`](https://github.com/tulehq/console/blob/v0.3.10/compose.yaml) runs every service and the console, wired
 together: one root key everywhere, every service pointed at identity so the
 keys identity issues work on all of them, each held to its IAM policies, and
 the console pointed at each. It pins the current release of every service.
@@ -72,7 +72,7 @@ x-identity: &identity-endpoint
 
 services:
   identity:
-    image: ghcr.io/tulehq/identity:0.5.1
+    image: ghcr.io/tulehq/identity:0.5.2
     environment:
       <<: *root-key
       TULE_Identity_AccountsEndpoint: http://accounts:9020
@@ -80,14 +80,14 @@ services:
     volumes: [identitydata:/data]
 
   accounts:
-    image: ghcr.io/tulehq/accounts:0.5.0
+    image: ghcr.io/tulehq/accounts:0.5.1
     environment:
       <<: [*root-key, *identity-endpoint]
     ports: ["9020:9020"]
     volumes: [accountsdata:/data]
 
   object-store:
-    image: ghcr.io/tulehq/object-store:0.13.0
+    image: ghcr.io/tulehq/object-store:0.13.1
     environment:
       <<: [*root-key, *identity-endpoint]
       # Bucket notifications are delivered to queues and functions.
@@ -97,21 +97,23 @@ services:
     volumes: [objectdata:/data]
 
   secret-store:
-    image: ghcr.io/tulehq/secret-store:0.6.0
+    image: ghcr.io/tulehq/secret-store:0.6.1
     environment:
       <<: [*root-key, *identity-endpoint]
+      # Rotation invokes rotation functions there.
+      TULE_Store_FunctionsEndpoint: http://functions:9060
     ports: ["9010:9010"]
     volumes: [secretdata:/data]
 
   mailbox:
-    image: ghcr.io/tulehq/mailbox:0.4.0
+    image: ghcr.io/tulehq/mailbox:0.4.1
     environment:
       <<: [*root-key, *identity-endpoint]
     ports: ["9040:9040"]
     volumes: [maildata:/data]
 
   queues:
-    image: ghcr.io/tulehq/queues:0.6.0
+    image: ghcr.io/tulehq/queues:0.6.1
     environment:
       <<: [*root-key, *identity-endpoint]
       # Queue URLs name the host clients on this machine reach queues at.
@@ -120,7 +122,7 @@ services:
     volumes: [queuesdata:/data]
 
   functions:
-    image: ghcr.io/tulehq/functions:0.6.1
+    image: ghcr.io/tulehq/functions:0.7.0
     profiles: [functions]
     depends_on:
       queues: {condition: service_healthy}
@@ -138,7 +140,7 @@ services:
     group_add: ["${DOCKER_GID:-0}"]
 
   console:
-    image: ghcr.io/tulehq/console:0.3.8
+    image: ghcr.io/tulehq/console:0.3.10
     depends_on:
       identity: {condition: service_healthy}
       accounts: {condition: service_healthy}
@@ -508,7 +510,7 @@ source mapping, each enabled or disabled from there.
   sign-in form has a token of its own in a cookie for the sign-in path.
 - **Static files** are embedded in the binary: one stylesheet, a small
   script, and htmx 2.0.11 from its npm package, unmodified, with its
-  license and checksums in [third_party/htmx](https://github.com/tulehq/console/tree/v0.3.8/third_party/htmx). Nothing is
+  license and checksums in [third_party/htmx](https://github.com/tulehq/console/tree/v0.3.10/third_party/htmx). Nothing is
   loaded from a CDN.
 
 ## Health checks
@@ -535,6 +537,6 @@ shows its service's own readiness.
 ## Release and module
 
 This page follows the console README at
-[v0.3.8](https://github.com/tulehq/console/blob/v0.3.8/README.md), released as
-`ghcr.io/tulehq/console:0.3.8`. Its Go module is `tule.dev/console`, with the
+[v0.3.10](https://github.com/tulehq/console/blob/v0.3.10/README.md), released as
+`ghcr.io/tulehq/console:0.3.10`. Its Go module is `tule.dev/console`, with the
 source at [github.com/tulehq/console](https://github.com/tulehq/console).

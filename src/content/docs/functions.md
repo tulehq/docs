@@ -1,6 +1,6 @@
 ---
 title: functions
-description: "functions 0.6.1: a local stand-in for Lambda."
+description: "functions 0.7.0: a local stand-in for Lambda."
 ---
 
 An AWS Lambda-compatible service that runs container-image functions
@@ -30,7 +30,7 @@ docker run --rm -p 9060:9060 -p 9061:9061 -v functionsdata:/data \
   -v /var/run/docker.sock:/var/run/docker.sock \
   --group-add "$(stat -c %g /var/run/docker.sock)" \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
-  ghcr.io/tulehq/functions:0.6.1
+  ghcr.io/tulehq/functions:0.7.0
 ```
 
 The image is based on Alpine and runs as the unprivileged `nonroot` user,
@@ -43,16 +43,18 @@ which reaches the socket through the socket's group:
   sees is the one inside Docker Desktop's VM, and its group there is not the
   one `stat` reports on the Mac for `/var/run/docker.sock`. Mount it with
   `-v /var/run/docker.sock:/var/run/docker.sock` and give the group the
-  socket has inside the VM, which `docker run --rm -v
-  /var/run/docker.sock:/s ghcr.io/tulehq/functions:0.6.1 stat -c %g /s`
-  would print; if the socket is owned by root with no group access, run the
-  image with `--user root` instead. This setup has not been tried.
+  socket has inside the VM, which `docker run --rm --entrypoint stat -v
+  /var/run/docker.sock:/s ghcr.io/tulehq/functions:0.7.0 -c %g /s`
+  would print (untested; `stat` is the Alpine base image's); if the
+  socket is owned by root with no group access, run the image with
+  `--user root` instead. This setup has not been tried.
 
 It keeps its database at `/data/functions.db` on the
 `/data` volume, and its Docker health check polls `/_ready`. Port 9061 is
 published because the function containers reach the Runtime API through
 the Docker host (`host.docker.internal`), not through the service's own
-container.
+container; on a network of its own, it need not be
+([On a compose network](#on-a-compose-network)).
 
 From source (Go 1.27.4 or later):
 
@@ -77,7 +79,7 @@ Event source mappings poll a queue over the SQS API. With
 ```yaml
 services:
   queues:
-    image: ghcr.io/tulehq/queues:0.6.0
+    image: ghcr.io/tulehq/queues:0.6.1
     environment:
       TULE_Auth_AccessKeyID: test
       TULE_Auth_SecretAccessKey: test
@@ -85,7 +87,7 @@ services:
     volumes: [queuesdata:/data]
 
   functions:
-    image: ghcr.io/tulehq/functions:0.6.1
+    image: ghcr.io/tulehq/functions:0.7.0
     depends_on: [queues]
     environment:
       TULE_Auth_AccessKeyID: test
@@ -113,6 +115,80 @@ queues pointed at the same identity). The function containers are not on
 the compose network: a function that calls queues itself reaches it as
 `host.docker.internal:9050`, through the published port.
 
+### On a compose network
+
+Through the Docker host, the function containers reach only what is
+published on an address the default bridge's gateway reaches: a port
+published on `127.0.0.1` alone is unreachable from them on a Linux daemon,
+for the Runtime API and the other Tule services alike. With
+`TULE_Functions_ContainerNetwork`, the function containers are attached to
+the service's own network instead, and reach the Runtime API and the
+other services on it by their service names, so nothing they call needs
+to be published on the host:
+
+```yaml
+services:
+  queues:
+    image: ghcr.io/tulehq/queues:0.6.1
+    environment:
+      TULE_Auth_AccessKeyID: test
+      TULE_Auth_SecretAccessKey: test
+    ports: ["127.0.0.1:9050:9050"]
+    networks: [tule]
+    volumes: [queuesdata:/data]
+
+  functions:
+    image: ghcr.io/tulehq/functions:0.7.0
+    depends_on: [queues]
+    environment:
+      TULE_Auth_AccessKeyID: test
+      TULE_Auth_SecretAccessKey: test
+      TULE_Functions_QueuesEndpoint: http://queues:9050
+      # The function containers join this network, and call back to the
+      # Runtime API at functions:9061, this service's name on it.
+      TULE_Functions_ContainerNetwork: tule
+      TULE_Functions_RuntimeAPIHost: functions
+      TULE_Functions_RuntimeAPIBind: 0.0.0.0
+    # Only the Lambda API is published; 9061 is reached on the network.
+    ports: ["127.0.0.1:9060:9060"]
+    networks: [tule]
+    volumes:
+      - functionsdata:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add: ["${DOCKER_GID}"]
+
+networks:
+  tule:
+    # A fixed name: compose otherwise prefixes the project's, and
+    # TULE_Functions_ContainerNetwork must name the network as Docker does.
+    name: tule
+
+volumes:
+  queuesdata:
+  functionsdata:
+```
+
+`TULE_Functions_RuntimeAPIHost` is the service's name on the network
+(`functions`, its compose service name, here), and
+`TULE_Functions_RuntimeAPIBind` an address the network reaches, such as
+`0.0.0.0`; the image sets the latter already. The network must be a
+user-defined one, whose DNS resolves the service's name: the service
+refuses to start with `none`, `bridge`, `default`, `host` or
+`container:<id>`, with a `TULE_Functions_RuntimeAPIHost` other than
+`host.docker.internal` but no `TULE_Functions_RuntimeAPIBind`, and when
+Docker has no network of that name.
+A function reaches queues as `http://queues:9050`, and any other service on
+the network by its name. The `host.docker.internal:host-gateway` mapping
+is only added when `TULE_Functions_RuntimeAPIHost` is
+`host.docker.internal`, so that name resolves in the function containers
+on a Linux daemon only then. The function containers are still found and
+removed by their labels, whatever network they are on.
+
+This file has not been run as written. The end-to-end tests run the
+service with these settings on a network of their own, with `docker run`,
+but from a `FROM scratch` build of the service running as root, not from
+this image as `nonroot` with `group_add`.
+
 ## Configuration
 
 Settings come from environment variables prefixed with `TULE_`, and from a
@@ -125,6 +201,7 @@ Settings come from environment variables prefixed with `TULE_`, and from a
 | `TULE_Functions_DockerHost` | `unix:///var/run/docker.sock` | The Docker daemon: a `unix://` socket or a `tcp://host:port` |
 | `TULE_Functions_RuntimeAPIHost` | `host.docker.internal` | The host the function containers reach the Runtime API at. With `host.docker.internal`, each container is given the `host.docker.internal:host-gateway` mapping, which a Linux daemon needs and Docker Desktop provides anyway |
 | `TULE_Functions_RuntimeAPIPort` | `9061` | The Runtime API's listen port. `0` picks a free port |
+| `TULE_Functions_ContainerNetwork` | unset | The Docker network the function containers are attached to, by name or ID, such as the service's own compose network. Unset, the default bridge. Set, `TULE_Functions_RuntimeAPIHost` is the service's name on that network and `TULE_Functions_RuntimeAPIBind` an address it reaches, such as `0.0.0.0`; the network must exist when the service starts. See [On a compose network](#on-a-compose-network) |
 | `TULE_Functions_RuntimeAPIBind` | unset (`0.0.0.0` in the image) | The IP address the Runtime API listens on. Unset, the address on the Docker host the containers reach it at, asked of Docker: `127.0.0.1` with Docker Desktop, which forwards `host.docker.internal` to the host's loopback, else the default bridge network's gateway, which `host-gateway` names. Set it when the containers reach the service some other way, such as `0.0.0.0` inside a container |
 | `TULE_Functions_QueuesEndpoint` | unset | The SQS endpoint event source mappings poll, such as `http://localhost:9050`: an http or https URL. Unset, `CreateEventSourceMapping` is refused |
 | `TULE_Functions_AccountID` | `000000000000` | The account ARNs carry: 12 digits |
@@ -554,7 +631,9 @@ Lambda does not reserve them. Each is `AWS_ENDPOINT_URL_` and the service's
 SDK ID, upper case with spaces as underscores, as the Go SDK's
 `config.LoadDefaultConfig` forms it; `AWS_ENDPOINT_URL` sets one for every
 service. The containers reach the other services through the Docker host,
-on their published ports:
+on their published ports, or, with `TULE_Functions_ContainerNetwork`, by
+their names on that network, such as `http://queues:9050`
+([On a compose network](#on-a-compose-network)):
 
 ```sh
 aws --endpoint-url http://localhost:9060 lambda update-function-configuration   --function-name hello --environment 'Variables={
@@ -952,6 +1031,19 @@ function that fails is no error: its result has `FunctionError` set.
   trusted, since nothing is expected in front of this service and the header
   is unsigned.
 
+## Upgrading from v0.6
+
+`TULE_Functions_ContainerNetwork` attaches the function containers to a
+Docker network, such as the service's own compose network, where they
+reach the Runtime API and the other services by name, with nothing
+published on the host ([On a compose network](#on-a-compose-network)).
+Unset, its default, the containers stay on the default bridge as before.
+
+The `server started` log line carries the bound address. It is written
+once the Lambda API's port is bound, with the bound address, such as
+`[::]:9060`, where it gave the configured `0.0.0.0:9060`, and a `tls`
+field. A server that cannot bind its port fails without writing it.
+
 ## Upgrading from v0.5
 
 The service invoke endpoint takes `DryRun`. An `InvocationType` of
@@ -1007,8 +1099,8 @@ Standalone use is unchanged.
 ## Release and module
 
 This page follows the functions README at
-[v0.6.1](https://github.com/tulehq/functions/blob/v0.6.1/README.md), released as
-`ghcr.io/tulehq/functions:0.6.1`. v0.6.1 moves to identity v0.5.1, so the
+[v0.7.0](https://github.com/tulehq/functions/blob/v0.7.0/README.md), released as
+`ghcr.io/tulehq/functions:0.7.0`. v0.6.1 moved to identity v0.5.1, so the
 service invoke endpoint accepts a `SourceArn` shorter than 20 characters,
 such as a bucket's `arn:aws:s3:::photos`. Its Go module is `tule.dev/functions`, with the
 source at [github.com/tulehq/functions](https://github.com/tulehq/functions).

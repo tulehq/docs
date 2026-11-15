@@ -1,6 +1,6 @@
 ---
 title: identity
-description: "identity 0.5.1: a local stand-in for IAM and STS."
+description: "identity 0.5.2: a local stand-in for IAM and STS."
 ---
 
 An AWS IAM- and STS-compatible identity service that keeps users, roles,
@@ -32,7 +32,7 @@ With Docker:
 docker run --rm -p 9030:9030 -v identitydata:/data \
   -e TULE_Auth_AccessKeyID=AKIAIOSFODNN7EXAMPLE \
   -e TULE_Auth_SecretAccessKey=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
-  ghcr.io/tulehq/identity:0.5.1
+  ghcr.io/tulehq/identity:0.5.2
 ```
 
 The image is based on Alpine, so `docker exec -it <container> sh` gives you a
@@ -686,6 +686,11 @@ role inherits what its ARN was granted.
 
 ## Upgrading
 
+From v0.5.1, the `server started` log line is written once the port is
+bound, and carries the bound address, such as `[::]:9030` where v0.5.1
+logged the configured `:9030`, and a `tls` field, `false`. A port that
+cannot be bound now fails startup without a `server started` line first.
+
 From v0.4.1, the signing-key endpoint answers older clients as before, and
 asks the accounts service nothing for them. The `keysource` client now asks
 for version 4, which v0.4.1 does not serve, so a service that takes it needs
@@ -738,8 +743,8 @@ From v0.1.0, v0.2.0 is a breaking release:
 ## Release and module
 
 This page follows the identity README at
-[v0.5.1](https://github.com/tulehq/identity/blob/v0.5.1/README.md), released as
-`ghcr.io/tulehq/identity:0.5.1`. v0.5.1 accepts a `SourceArn` shorter than
+[v0.5.2](https://github.com/tulehq/identity/blob/v0.5.2/README.md), released as
+`ghcr.io/tulehq/identity:0.5.2`. Since v0.5.1, it accepts a `SourceArn` shorter than
 20 characters, such as a bucket's `arn:aws:s3:::photos`: the source ARN
 check no longer applies the 20-character minimum IAM sets for its own
 resource ARNs, and takes any ARN of up to 2,048 characters. Its Go module is `tule.dev/identity`, with the
