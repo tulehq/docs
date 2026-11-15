@@ -1,6 +1,6 @@
 ---
 title: object-store
-description: "object-store 0.12.0: a local stand-in for S3."
+description: "object-store 0.13.0: a local stand-in for S3."
 ---
 
 An S3-compatible object store that keeps objects on the local filesystem. It is
@@ -19,7 +19,7 @@ With Docker:
 docker run --rm -p 9000:9000 -v s3data:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
   -e TULE_Storage_Buckets=uploads,assets \
-  ghcr.io/tulehq/object-store:0.12.0
+  ghcr.io/tulehq/object-store:0.13.0
 ```
 
 The image is based on Alpine, so `docker exec -it <container> sh` gives you a
@@ -51,6 +51,8 @@ Settings come from environment variables prefixed with `TULE_`, and from a
 | `TULE_Auth_SecretAccessKey` | required | Its secret |
 | `TULE_Auth_AccountID` | `000000000000` | The account the configured key and the buckets belong to: identity's management account (`TULE_Identity_AccountID`), 12 digits. Principals of other accounts need a bucket policy granting them ([below](#cross-account-access)) |
 | `TULE_Auth_IdentityEndpoint` | unset | The [identity](/identity/) service's base URL, such as `http://localhost:9030`, to also accept the keys it issues and enforce their IAM policies and bucket policies ([below](#permissions)). Must be an absolute `http` or `https` URL; needs identity v0.5.0 or later |
+| `TULE_Storage_QueuesEndpoint` | unset | The [queues](/queues/) service's base URL, such as `http://localhost:9050`, whose service send endpoint queue destinations of event notifications are validated and delivered through ([Event notifications](#event-notifications)). Must be an absolute `http` or `https` URL; needs queues v0.6.0 or later. Unset, a queue destination is refused |
+| `TULE_Storage_FunctionsEndpoint` | unset | The [functions](/functions/) service's base URL, such as `http://localhost:9060`, whose service invoke endpoint function destinations are validated and invoked through. Must be an absolute `http` or `https` URL; needs functions v0.6.1 or later. Unset, a function destination is refused |
 | `TULE_GasEnv` | | `development` logs at trace level, `testing` disables logging |
 
 The server refuses to start without credentials, and every request must be
@@ -267,6 +269,7 @@ lists for it, on `arn:aws:s3:::<bucket>` or `arn:aws:s3:::<bucket>/<key>`:
 | GetObjectAttributes | `s3:GetObject`, then `s3:GetObjectAttributes`; with `?versionId`, `s3:GetObjectVersion`, then `s3:GetObjectVersionAttributes` | object |
 | PutBucketEncryption, DeleteBucketEncryption; GetBucketEncryption | `s3:PutEncryptionConfiguration`; `s3:GetEncryptionConfiguration` | bucket |
 | PutBucketLifecycleConfiguration, DeleteBucketLifecycle; GetBucketLifecycleConfiguration | `s3:PutLifecycleConfiguration`; `s3:GetLifecycleConfiguration` | bucket |
+| PutBucketNotificationConfiguration; GetBucketNotificationConfiguration | `s3:PutBucketNotification`; `s3:GetBucketNotification` | bucket |
 
 A write's headers add actions on the same resource. CreateBucket with an
 `x-amz-object-ownership` header also needs `s3:PutBucketOwnershipControls`,
@@ -311,7 +314,16 @@ PutBucketLifecycleConfiguration and GetBucketLifecycleConfiguration, and the
 Service Authorization Reference authorizes them with the same actions, so
 they are served and evaluated as those ([Lifecycle](#lifecycle)). The
 lifecycle operations are not limited to the owner's account, as on S3,
-where the owner can grant others access with an access policy.
+where the owner can grant others access with an access policy. Nor are
+the notification configuration operations, which the owner can grant
+others with a bucket policy, as their API reference says. The deprecated
+PutBucketNotification and GetBucketNotification share their request lines
+and are served and evaluated as those; the reference authorizes
+GetBucketNotification with `s3:GetBucketNotification` and lists no action
+for PutBucketNotification, which is evaluated as `s3:PutBucketNotification`.
+The caller needs no permission on a destination: only the destination's
+own policy is evaluated, for `s3.amazonaws.com`
+([Event notifications](#event-notifications)).
 PutBucketVersioning is not limited to the owner's account, as on S3, where only MFA delete is, and MFA delete is refused
 ([Versioning](#versioning)).
 
@@ -335,8 +347,10 @@ identity reports them: `aws:PrincipalArn` (a user's ARN with its path, a
 session's role's ARN with the role's path), `aws:userid`,
 `aws:PrincipalType`, `aws:PrincipalAccount`, for IAM users `aws:username`,
 `aws:PrincipalTag/<key>` for each tag of a user or of a session's role, and
-`aws:PrincipalOrgID` and `aws:PrincipalOrgPaths`. They fill policy variables
-too.
+`aws:PrincipalOrgID` and `aws:PrincipalOrgPaths`, and
+`aws:PrincipalIsAWSService` as `false`, with `aws:PrincipalServiceName`
+absent, whatever a request carries (tule.dev/policy v0.4.0). They fill
+policy variables too.
 
 `aws:PrincipalOrgID` (the organization's ID, `o-...`) and
 `aws:PrincipalOrgPaths` (one path, `o-.../r-.../ou-.../`, down to the
@@ -442,6 +456,39 @@ for:
   only once the caller may read them; UploadPartCopy, which copies no tags,
   checks the destination first. S3 does not document its order, which
   decides the action a doubly denied copy names.
+
+### Changes in v0.13.0
+
+- Bucket notification configuration is served
+  ([Event notifications](#event-notifications)):
+  PutBucketNotificationConfiguration and
+  GetBucketNotificationConfiguration, and the deprecated
+  PutBucketNotification and GetBucketNotification, which answered
+  `501 NotImplemented`. They are evaluated as `s3:PutBucketNotification`
+  and `s3:GetBucketNotification`. The events are delivered to queues and
+  functions ([Delivery](#delivery)). Lifecycle expirations send the
+  `LifecycleExpiration` events ([Lifecycle events](#lifecycle-events)).
+- **Data:** events are recorded under `.tule/events/` and a write that
+  records one adds `writeId` to its object's trailer, which v0.12.0
+  ignores; nothing is written for a bucket without a configuration. A
+  v0.12.0 data directory loads unchanged: the first start adds an empty
+  `.tule/events/`, and the first event recorded adds `.tule/eventseq`,
+  which keeps the events recorded after a restart in order.
+- **Downgrade:** moving back to v0.12.0, the events not yet delivered are
+  never delivered, and configurations are ignored.
+- New settings: `TULE_Storage_QueuesEndpoint` and
+  `TULE_Storage_FunctionsEndpoint` ([Configuration](#configuration)).
+- `aws:PrincipalIsAWSService` is `false` for every evaluated principal,
+  where it was absent, and `aws:PrincipalServiceName` is absent whatever
+  the request carries (tule.dev/policy v0.4.0). A `Bool` `Deny` on
+  `aws:PrincipalIsAWSService` being `false` now applies.
+- Every response, errors included, answers `x-amz-request-id` and
+  `x-amz-id-2`, and an error body's `<RequestId>` and `<HostId>` are the
+  same pair, which SDKs report as the request ID and extended request ID
+  ([Request IDs](#request-ids)). The request ID was `dev-1`, `dev-2` and
+  so on outside production-like environments and only reached error
+  bodies; it is now random everywhere, and a client's `X-Request-Id`
+  header no longer sets it.
 
 ### Changes in v0.12.0
 
@@ -1379,6 +1426,319 @@ does:
 A sweep holds its bucket for at most 64 keys or 200 ms at a time, with a
 pause between, so a DeleteBucket is never held up by it.
 
+## Event notifications
+
+PutBucketNotificationConfiguration (`PUT /<bucket>?notification`) stores
+a bucket's notification configuration, replacing any it had, and answers
+`200` with no body. GetBucketNotificationConfiguration answers it, or,
+for a bucket without one, an empty `NotificationConfiguration`: "If
+notifications are not enabled on the bucket, the action returns an empty
+`NotificationConfiguration` element" (its API reference). An empty
+configuration turns notifications off: "You can disable notifications by
+adding the empty `NotificationConfiguration` element". There is no
+DeleteBucketNotification, on S3 or here (`DELETE ?notification` answers
+`501 NotImplemented`). The deprecated PutBucketNotification and
+GetBucketNotification share these request lines and are served as these
+operations: a `CloudFunctionConfiguration`'s `InvocationRole` is read
+and dropped. As with the other bucket configurations, the Put is
+evaluated before its document is read, `x-amz-expected-bucket-owner` is
+taken, and `Content-MD5` and the checksum headers are accepted and
+ignored. A document over 1 MiB is refused with
+`400 MaxMessageLengthExceeded`.
+
+The events a configuration matches are sent to its queue or function as
+S3 sends them, as `s3.amazonaws.com`, in the background: a write never
+waits for a destination, and a destination that fails or does not answer
+never fails a write ([Delivery](#delivery)).
+
+### The configuration document
+
+A configuration holds `TopicConfiguration`, `QueueConfiguration` and
+`CloudFunctionConfiguration` elements, the SDK's
+`LambdaFunctionConfigurations`, and at most one
+`EventBridgeConfiguration`. GET answers them in that order, each with
+its `Id`, ARN, `Event`s and `Filter`, filter rule names in lower case; a
+`Filter` with no rules is dropped. A configuration without an `Id` is
+given one, the standard base64 of a random UUID, the form of the API
+reference's sample Id. A configuration stored in another generation of
+its bucket, which a server that did not know notification configurations
+can leave across a delete and create, is none. Unknown elements are
+ignored.
+
+Each configuration is checked in document order, and the first error is
+answered; these checks are never skipped:
+
+| Check | Answer |
+|---|---|
+| Not XML, another root, a configuration without its `Topic`, `Queue` or `CloudFunction` or without an `Event`, an element repeated where one is allowed, two `EventBridgeConfiguration` | `400 MalformedXML` |
+| An `Event` that is not one of S3's event types (the SDK's `Event` enum); `s3:TestEvent` is refused, as only S3 sends it | `400 InvalidArgument` "The event is not supported for notifications" |
+| A `FilterRule` `Name` other than `prefix` or `suffix`, in any case | `400 InvalidArgument` "filter rule name must be either prefix or suffix" |
+| Two prefix or two suffix rules in a filter | `400 InvalidArgument` "Cannot specify more than one prefix rule in a filter." (or suffix) |
+| A rule `Value` over 1,024 characters | `400 InvalidArgument` |
+| An `Id` over 255 characters, or an `Id` used twice | `400 InvalidArgument` |
+| An ARN that does not parse, of another service than its element's, or of another partition than `aws` | `400 InvalidArgument` "The ARN is not well formed", with `ArgumentName1` the element and `ArgumentValue1` the ARN |
+| An ARN of another region than `us-east-1`, the region of every bucket, or a FIFO queue or topic ("Amazon SQS FIFO ... queues aren't supported", S3 User Guide) | `400 InvalidArgument`, with the ARN as above |
+| Two configurations, of any destination types, whose event types, wildcards expanded, share one and whose filters overlap: each prefix starts the other, and each suffix ends the other, a missing one overlapping every other ("Configuring event notifications using object key name filtering", S3 User Guide) | `400 InvalidArgument` "Configurations overlap. Configurations on the same bucket cannot share a common event type." |
+
+The messages S3 documents none of are strings S3 was seen to answer, or
+choices; they have not been checked against S3.
+
+### Destination validation
+
+S3 "first verifies that any ... SNS or SQS destination exists, and that
+the bucket owner has permission to publish to it by sending a test
+notification. In the case of AWS Lambda destinations, Amazon S3 verifies
+that the Lambda function permissions grant Amazon S3 permission to invoke
+the function" (PutBucketNotificationConfiguration API reference). So,
+unless `x-amz-skip-destination-validation` is `true`, each distinct
+destination is validated before the configuration is stored, as
+`s3.amazonaws.com`, with `aws:SourceArn` `arn:aws:s3:::<bucket>` and
+`aws:SourceAccount` `TULE_Auth_AccountID`, the owner of every bucket:
+
+- **A queue** is sent an `s3:TestEvent` through the queues service's
+  [service send endpoint](/queues/#the-service-send-endpoint),
+  once for each distinct queue ARN. The message stays in the queue, as on
+  AWS:
+
+  ```json
+  {"Service":"Amazon S3","Event":"s3:TestEvent","Time":"2026-11-15T10:30:00.123Z",
+   "Bucket":"photos","RequestId":"9F2C61B05D3E4A17","HostId":"..."}
+  ```
+
+  `RequestId` and `HostId` are the Put's own `x-amz-request-id` and
+  `x-amz-id-2`. The queue's policy must allow `s3.amazonaws.com`
+  `sqs:SendMessage`, as the S3 User Guide's ("Granting permissions to
+  publish event notification messages to a destination") does:
+
+  ```json
+  {"Effect": "Allow", "Principal": {"Service": "s3.amazonaws.com"},
+   "Action": ["SQS:SendMessage"], "Resource": "arn:aws:sqs:us-east-1:000000000000:events",
+   "Condition": {"ArnLike": {"aws:SourceArn": "arn:aws:s3:*:*:photos"},
+                 "StringEquals": {"aws:SourceAccount": "000000000000"}}}
+  ```
+- **A function** is checked with a `DryRun` through the functions
+  service's [service invoke endpoint](/functions/#the-service-invoke-endpoint):
+  its function policy is evaluated and nothing runs or is recorded. The
+  functions service evaluates the policy before the function's state, so
+  a function that is `Pending`, `Failed` or updating, whose policy allows
+  S3, validates: S3 checks the permission alone. The
+  permission `aws lambda add-permission --action lambda:InvokeFunction
+  --principal s3.amazonaws.com --source-arn arn:aws:s3:::<bucket>
+  --source-account <account>` adds allows it.
+- **A topic** always fails: there is no topic service. With
+  `x-amz-skip-destination-validation: true` it is stored and answered by
+  GET, and no event is ever sent to it.
+- **EventBridge** names no destination, so it is never validated; it is
+  stored and answered, and no event is ever sent to it.
+
+Every destination is tried, and every one that fails is answered, in the
+order GET answers them, as one `400 InvalidArgument` "Unable to validate
+the following destination configurations", each failing ARN an
+`ArgumentName<n>` and its reason the `ArgumentValue<n>`; nothing is
+stored, and test events already sent stay sent. Up to 8 destinations are
+validated at once, and validating a configuration takes at most 30
+seconds: a call still running then is canceled, and a destination not
+yet called fails, both as not reached. The reasons:
+
+| Destination | Reason |
+|---|---|
+| A queue whose policy does not allow S3 | Permissions on the destination queue do not allow S3 to publish notifications from this bucket |
+| A function whose policy does not allow S3 | Not authorized to invoke function [`<arn>`] |
+| A queue or function that does not exist, one of another account or region than its service serves, and any topic | The destination does not exist |
+| A queue or function whose service has no endpoint | The destination's service is not configured in this Tule (`TULE_Storage_QueuesEndpoint` or `TULE_Storage_FunctionsEndpoint`) |
+| A destination that refuses the call's content: a test event the queue refuses, or a payload or result the functions service refuses (`400`, `413`, `502`) | The destination refused the test message |
+| Anything else: a service that does not answer within 10 seconds or fails, or a destination not validated within 30 seconds of the first call | The destination could not be reached (the failure is logged at Warn) |
+
+With `x-amz-skip-destination-validation: true` (or `false`, in any case;
+another value is `400 InvalidArgument`), the configuration is stored
+without calling any destination.
+
+### Destination settings
+
+`TULE_Storage_QueuesEndpoint` and `TULE_Storage_FunctionsEndpoint`
+([Configuration](#configuration)) are the base URLs of the queues and
+functions services. Both endpoints accept only the root user of their
+service's account, so the calls are signed with the configured
+`TULE_Auth_AccessKeyID` and `TULE_Auth_SecretAccessKey`, for
+`us-east-1`: configure the same root key on all three services, or
+identity's root key when they use identity. The destination service's
+region must be `us-east-1` and its account the one a destination's ARN
+names; an ARN of another account or region is answered as not existing.
+A destination in another account works when that service runs as that
+account and its policy names `aws:SourceAccount` `TULE_Auth_AccountID`.
+Each call waits at most 10 seconds.
+
+### Events and their messages
+
+An event is recorded when the change is committed, and never for a
+request that fails or is refused, a precondition failure included:
+
+| Operation | Event | Object fields |
+|---|---|---|
+| PutObject, presigned PUTs included | `ObjectCreated:Put` | `key`, `size`, `eTag`, `versionId`, `sequencer` |
+| CopyObject (the destination bucket's configuration) | `ObjectCreated:Copy` | as Put, and `"hasObjectAnnotation": false` |
+| CompleteMultipartUpload, UploadPartCopy parts included | `ObjectCreated:CompleteMultipartUpload` | as Put; `eTag` is `<md5>-<parts>` |
+| DeleteObject, or a key of DeleteObjects, in an Unversioned bucket, of an object that existed | `ObjectRemoved:Delete` | `key`, `sequencer` |
+| A delete without a version ID, Enabled or Suspended | `ObjectRemoved:DeleteMarkerCreated` | `key`, `versionId` (the marker's; `null` when Suspended), `sequencer` |
+| A delete of a version or marker that existed | `ObjectRemoved:Delete` | `key`, `versionId`, `sequencer` |
+| PutObjectTagging | `ObjectTagging:Put` | `key`, `eTag`, `versionId` |
+| DeleteObjectTagging | `ObjectTagging:Delete` | `key`, `eTag`, `versionId` |
+| PutObjectAcl that changes the stored ACL | `ObjectAcl:Put` | `key`, `eTag`, `versionId` |
+
+`versionId` is there whenever the bucket is not Unversioned, with the
+value of the response's `x-amz-version-id`. Lifecycle expirations send
+the `LifecycleExpiration` events ([Lifecycle events](#lifecycle-events)).
+The other event types a configuration accepts
+(restore, replication, reduced redundancy, Intelligent-Tiering, object
+annotation and retention, `ObjectCreated:Post`, `LifecycleTransition`)
+never fire, as their features are not served. Overlapping configurations
+are refused, so an event matches at most one configuration and is sent
+once.
+
+A message is `{"Records":[...]}` with one record, in the field order of
+the S3 User Guide ("Event message structure"); a queue gets it as the
+message body, and a function as the payload, which aws-lambda-go's
+`events.S3Event` decodes. The PUT of `uploads/red flower.jpg` into the
+Enabled bucket `photos` by an IAM user, through the configuration
+`uploads-to-queue`:
+
+```json
+{"Records":[{"eventVersion":"2.6","eventSource":"aws:s3","awsRegion":"us-east-1",
+ "eventTime":"2026-11-15T10:30:00.123Z","eventName":"ObjectCreated:Put",
+ "userIdentity":{"principalId":"AIDAQ3EGRSXBEXAMPLE1"},
+ "requestParameters":{"sourceIPAddress":"127.0.0.1"},
+ "responseElements":{"x-amz-request-id":"9F2C61B05D3E4A17","x-amz-id-2":"..."},
+ "s3":{"s3SchemaVersion":"1.0","configurationId":"uploads-to-queue",
+  "bucket":{"name":"photos","ownerIdentity":{"principalId":"A2Q7W5ZK3XEXMP"},
+   "arn":"arn:aws:s3:::photos"},
+  "object":{"key":"uploads/red+flower.jpg","size":1024,
+   "eTag":"d41d8cd98f00b204e9800998ecf8427e","versionId":"0PHV8M1J4K2TG5A7Q3RS9MNOPB",
+   "sequencer":"1879A3F2C4B5D600"}}}]}
+```
+
+`eventTime` is the commit's time; `x-amz-request-id` and `x-amz-id-2`
+are the response headers of the request that caused the event. The
+`sequencer` is the change's commit sequence, 16 upper-case hex digits:
+of two events of one key, the one with the greater sequencer happened
+later, as the S3 User Guide gives it; it does not order events of
+different keys.
+
+Where S3's documentation leaves a field or a case open, this service
+chooses:
+
+| # | Case | Choice |
+|---|---|---|
+| N1 | `eventVersion` of each event type | `2.6` for all ("Starting with version 2.4, Amazon S3 uses a single unified version for all event types") |
+| N2 | `userIdentity.principalId` | The principal's unique ID, as `aws:userid` is (`AIDA...` for a user, `AROA...:<session>` for a role session), or the account ID for the root key; `s3.amazonaws.com` for a lifecycle event ([Lifecycle events](#lifecycle-events)); no `AWS:` prefix, as the User Guide's example has none |
+| N3 | `requestParameters.sourceIPAddress` of a lifecycle event, which no request causes | `s3.amazonaws.com` |
+| N4 | `ownerIdentity.principalId`, which the User Guide calls no longer used | A fixed ID per account: `A` and the first 13 characters of the base32 of the SHA-256 of `tule:<account>` |
+| N5 | The URL encoding of `key` beyond a space written `+` | Each `/`-separated segment form-encoded as Go's `url.QueryEscape` does, `/` kept: `a b/c+d=e.txt` is `a+b/c%2Bd%3De.txt`. `*` is `%2A` and `~` is kept, which S3 may write differently |
+| N6 | Whether filters match the key or its encoding | The encoding, since filter values must write a space `+` and other special characters URL-encoded |
+| N7 | The object fields of removal, tagging and ACL events | Removal: `key`, `versionId`, `sequencer`. Tagging and ACL: `key`, `eTag`, `versionId`, no `size` and no `sequencer`, which the User Guide says is "only used with PUT and DELETE requests" |
+| N8 | `versionId` when Unversioned or Suspended | Left out when Unversioned; `null` for the null version when Suspended |
+| N9 | A delete of a key or version that does not exist | No event |
+| N10 | A Suspended delete without a version ID, which replaces the null version | One `ObjectRemoved:DeleteMarkerCreated` |
+| N11 | A delete marker left as its key's only version, which lifecycle removes | One `LifecycleExpiration:Delete` with the marker's `versionId` |
+| N12 | Overlap across destination types | Refused as within one type ([The configuration document](#the-configuration-document)) |
+| N16 | A limit on the number of configurations | None; the document is at most 1 MiB |
+| N17 | Retries and giving up | [Delivery](#delivery) |
+| N18 | The SQS `SenderId` of an event message | `s3.amazonaws.com` |
+| N22 | A DeleteObjectTagging of an object without tags, a PutObjectTagging of the tags it has | An event each time: S3 documents no "no change" rule for tags, as it does for ACLs |
+
+The other choices are those of the configuration and its validation
+above: event types, filter rules, ARNs and the reasons a destination is
+refused (N13, N14, N15, N19, N20, N21, N23, N24, N25).
+
+### Delivery
+
+S3 says event notifications are "designed to be delivered at least
+once. Typically, event notifications are delivered in seconds but can
+sometimes take a minute or longer" (S3 User Guide, "Amazon S3 Event
+Notifications"). Here:
+
+- **Recording.** Each event is recorded under the key's lock, in a
+  durable outbox in the storage root, `.tule/events/<bucket>/`, before
+  the write answers: an intent before the change is committed and the
+  event once it is, so a stop at any point loses no committed change's
+  event, and records none for a change that did not happen. A failure to
+  record is logged at Error and never fails the write. A bucket's events
+  are delivered after it is deleted, and a deleted bucket's outbox is
+  removed once it is empty; a live bucket's is kept.
+- **When.** The deliverer starts once the server is ready, after the
+  events a stop left are settled. A recorded event wakes it at once, and
+  it reads the outbox every 5 seconds besides.
+- **Order.** Up to 4 buckets are delivered at once, each one event at a
+  time, in the order its events were recorded. The outbox is read 100
+  events at a time, the buckets in turn, each read starting after the
+  bucket the previous full one reached, and leaving out the events
+  waiting for a retry and the buckets being delivered: so events waiting
+  for retries, however many, never hold back their bucket's later events,
+  and many buckets never hold back the others. Under retries events can
+  arrive out of order, which S3 allows: they "aren't guaranteed to arrive
+  in the same order". The `sequencer` orders the events of one key.
+- **Retries.** A failed delivery is retried 1 second later, then after
+  twice the wait before, up to 60 seconds, until 10 deliveries failed: a
+  destination that does not exist or whose policy refuses
+  `s3.amazonaws.com` is retried too, as it may be fixed meanwhile. Each
+  delivery waits at most 10 seconds. An event delivered or dropped whose
+  removal from the outbox fails, as on a read-only disk, is removed again
+  on the same schedule, and not delivered again.
+- **Drops.** An event is dropped after its 10th failed delivery; at once
+  when the destination refuses its content, as a queue does a message
+  over its `MaximumMessageSize` ("Amazon SQS rejects the notification and
+  doesn't deliver the event", S3 User Guide), or when its service has no
+  endpoint any more; and when it is read more than 24 hours after it was
+  recorded. Drops are logged at Warn, one line per bucket, reason and
+  destination with their count and the first event's key, event name
+  and error: a group's first drop at once, and those after it at most
+  once every 5 seconds, so neither a backlog dropped at once nor a steady
+  trickle logs a line per event; a stop logs those left. Each drop is
+  logged at Debug.
+- **Restarts.** The failures are counted in memory, so after a restart an
+  event gets another 10 deliveries; the 24 hours bound that. An event in
+  flight when the server stops stays in the outbox and is delivered again
+  after the next start, a duplicate S3 allows ("On rare occasions ...
+  duplicate S3 Event Notifications"). A duplicate has the same
+  `sequencer`.
+
+### Lifecycle events
+
+What lifecycle rules ([Lifecycle](#lifecycle)) do to a key records the
+events S3 sends for it: "The `s3:LifecycleExpiration:Delete` event type
+notifies you when an object in an unversioned bucket is deleted. It also
+notifies you when an object version is permanently deleted by an S3
+Lifecycle configuration. The `s3:LifecycleExpiration:DeleteMarkerCreated`
+event type notifies you when S3 Lifecycle creates a delete marker when a
+current version of an object in versioned bucket is deleted" ("Event
+notification types and destinations", S3 User Guide).
+
+| Action | Event | `versionId` |
+|---|---|---|
+| An object of an unversioned bucket expires | `LifecycleExpiration:Delete` | none |
+| A noncurrent version expires | `LifecycleExpiration:Delete` | the version's |
+| The current version expires, adding a delete marker | `LifecycleExpiration:DeleteMarkerCreated` | the marker's, `null` in a Suspended bucket |
+| A Suspended bucket's null version is replaced by that marker | `LifecycleExpiration:Delete` | `null` |
+| A delete marker left as the key's only version is removed | `LifecycleExpiration:Delete` | the marker's |
+
+The actions of one run on a key are committed together, and each records
+its own event, the removals in the order they were made, then the marker,
+each with its own sequencer, later than the one before it. They match
+`s3:LifecycleExpiration:*` and the two types above, never
+`s3:ObjectRemoved:*`: those "don't alert you for automatic deletes from
+lifecycle configurations". An incomplete multipart upload a rule aborts
+records nothing, as S3 has no event type for it, and transitions record
+nothing, since they change nothing here.
+
+A lifecycle event comes from S3 itself, not from a request:
+`userIdentity.principalId` and `requestParameters.sourceIPAddress` are
+`s3.amazonaws.com` (N2, N3), a choice, as S3's documentation does not
+give the values of a lifecycle event. `responseElements` carries a fresh
+`x-amz-request-id` and `x-amz-id-2` for each event, in the form of a
+response's ([Request IDs](#request-ids)), which no response carries. Its
+`eventTime` is the commit's time on the server's clock, like every
+event's.
+
+
 ## Health checks
 
 `GET /_health` (liveness) and `GET /_ready` (readiness) answer without a
@@ -1422,6 +1782,18 @@ bucket has a CORS configuration allowing the page's origin
 ([CORS](#cors)); without one, a browser's cross-origin requests to the
 bucket are refused, as on S3.
 
+### Request IDs
+
+Every response, errors and CORS preflights included, carries the pair S3
+answers: `x-amz-request-id`, 16 uppercase hex characters (8 random bytes),
+and `x-amz-id-2`, the standard base64 of 48 random bytes (64 characters).
+An error body's `<RequestId>` and `<HostId>` are the same pair, and the
+request ID is the `request_id` of the request's log line, so a failure an
+SDK reports can be found in the logs. Both are random in every
+environment, so neither repeats across a restart, and the server never
+takes a request ID from the client: an `X-Request-Id` header is ignored,
+as on S3. Treat both as opaque; their format may change.
+
 ## Supported operations
 
 - **Buckets:** ListBuckets, CreateBucket, HeadBucket, DeleteBucket,
@@ -1440,6 +1812,12 @@ bucket are refused, as on S3.
   deprecated PutBucketLifecycle and GetBucketLifecycle, with expiration,
   noncurrent version expiration, expired delete marker removal and the
   abort of incomplete multipart uploads applied in the background.
+- **Event notifications** ([above](#event-notifications)):
+  PutBucketNotificationConfiguration and
+  GetBucketNotificationConfiguration, and the deprecated
+  PutBucketNotification and GetBucketNotification, with destinations
+  validated through the queues and functions services, and events
+  delivered to queues and functions.
 - **Listing:** ListObjectsV2 and ListObjects (v1), with prefix, delimiter,
   paging and `encoding-type=url`; ListObjectVersions, with prefix,
   delimiter, key and version-id markers and `encoding-type=url`.
@@ -1489,7 +1867,7 @@ bucket are refused, as on S3.
     ghcr.io/tulehq/object-store:0.3.1
   docker run -d --name new -p 9001:9000 -v s3data-new:/data \
     -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
-    ghcr.io/tulehq/object-store:0.12.0
+    ghcr.io/tulehq/object-store:0.13.0
   export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1
   for b in $(aws s3 ls --endpoint-url http://localhost:9000 | awk '{print $3}'); do
     aws s3 sync "s3://$b" "copy/$b" --endpoint-url http://localhost:9000
@@ -1573,6 +1951,6 @@ bucket are refused, as on S3.
 ## Release and module
 
 This page follows the object-store README at
-[v0.12.0](https://github.com/tulehq/object-store/blob/v0.12.0/README.md), released as
-`ghcr.io/tulehq/object-store:0.12.0`. Its Go module is `tule.dev/object-store`, with the
+[v0.13.0](https://github.com/tulehq/object-store/blob/v0.13.0/README.md), released as
+`ghcr.io/tulehq/object-store:0.13.0`. Its Go module is `tule.dev/object-store`, with the
 source at [github.com/tulehq/object-store](https://github.com/tulehq/object-store).

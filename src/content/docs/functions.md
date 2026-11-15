@@ -1,6 +1,6 @@
 ---
 title: functions
-description: "functions 0.5.0: a local stand-in for Lambda."
+description: "functions 0.6.1: a local stand-in for Lambda."
 ---
 
 An AWS Lambda-compatible service that runs container-image functions
@@ -30,7 +30,7 @@ docker run --rm -p 9060:9060 -p 9061:9061 -v functionsdata:/data \
   -v /var/run/docker.sock:/var/run/docker.sock \
   --group-add "$(stat -c %g /var/run/docker.sock)" \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
-  ghcr.io/tulehq/functions:0.5.0
+  ghcr.io/tulehq/functions:0.6.1
 ```
 
 The image is based on Alpine and runs as the unprivileged `nonroot` user,
@@ -44,7 +44,7 @@ which reaches the socket through the socket's group:
   one `stat` reports on the Mac for `/var/run/docker.sock`. Mount it with
   `-v /var/run/docker.sock:/var/run/docker.sock` and give the group the
   socket has inside the VM, which `docker run --rm -v
-  /var/run/docker.sock:/s ghcr.io/tulehq/functions:0.5.0 stat -c %g /s`
+  /var/run/docker.sock:/s ghcr.io/tulehq/functions:0.6.1 stat -c %g /s`
   would print; if the socket is owned by root with no group access, run the
   image with `--user root` instead. This setup has not been tried.
 
@@ -77,7 +77,7 @@ Event source mappings poll a queue over the SQS API. With
 ```yaml
 services:
   queues:
-    image: ghcr.io/tulehq/queues:0.5.0
+    image: ghcr.io/tulehq/queues:0.6.0
     environment:
       TULE_Auth_AccessKeyID: test
       TULE_Auth_SecretAccessKey: test
@@ -85,7 +85,7 @@ services:
     volumes: [queuesdata:/data]
 
   functions:
-    image: ghcr.io/tulehq/functions:0.5.0
+    image: ghcr.io/tulehq/functions:0.6.1
     depends_on: [queues]
     environment:
       TULE_Auth_AccessKeyID: test
@@ -747,10 +747,11 @@ identity's [assume-role endpoint](/identity/#the-assume-role-endpoint).
   DNS labels ending in `.amazonaws.com`. `SourceArn`, an ARN of at most 1024
   characters, and `SourceAccount`, 12 digits, are optional: the resource the
   service acts for and its account, such as a secret's. `InvocationType` is
-  `RequestResponse`, the default, or `Event`. `Payload` is the event, any
-  JSON value, `{}` when left out, within `Invoke`'s limits (6 MB for
-  `RequestResponse`, 1 MB for `Event`), and the function gets its bytes as
-  they are.
+  `RequestResponse`, the default, `Event`, or `DryRun`, which, as
+  `Invoke`'s does, only checks that the service may invoke the function.
+  `Payload` is the event, any JSON value, `{}` when left out, within
+  `Invoke`'s limits (6 MB for `RequestResponse` and `DryRun`, 1 MB for
+  `Event`), and the function gets its bytes as they are.
 - **Evaluation.** Only the function policy is evaluated, with
   tule.dev/policy's `AuthorizeService`, as a service principal has no
   identity policies. It must allow the service principal
@@ -773,6 +774,8 @@ identity's [assume-role endpoint](/identity/#the-assume-role-endpoint).
 - **Execution.** Exactly as an `Invoke` of the same type: the same
   runner, timeout, state checks and, for `Event`, retries. The history
   records it with the source `service` ([Retrieval API](#retrieval-api)).
+  A `DryRun` is evaluated and held to the state checks as the others are,
+  and then runs nothing and is not recorded.
 - **Response.** `X-Amzn-RequestId` is the invocation's request ID, under
   which the retrieval API keeps it. `200` for `RequestResponse`, with the
   function's result, or its error document when it failed, as the
@@ -785,7 +788,9 @@ identity's [assume-role endpoint](/identity/#the-assume-role-endpoint).
 
   `FunctionError` is left out when the function succeeded, and `Payload`
   when it returned nothing. `202` `{"StatusCode": 202}` for `Event`, once
-  it is queued.
+  it is queued. `204` with no body for `DryRun`, as `Invoke` answers one;
+  its `X-Amzn-RequestId` is the call's own, as nothing ran, and the
+  retrieval API keeps nothing under it.
 - **Refusals.** `{"Code": "...", "Message": "..."}`, the shape of
   identity's internal endpoints' errors: `404` `ResourceNotFound` (no such
   function, or an ARN of another account or region), `403` `AccessDenied`
@@ -795,7 +800,9 @@ identity's [assume-role endpoint](/identity/#the-assume-role-endpoint).
   `429` `TooManyRequests` (the function at its container cap), and `502`
   `InvalidFunctionResponse` when the function ran and its result is not
   JSON; that invocation is in the history. A failure of the store is `500`
-  `InternalFailure`.
+  `InternalFailure`. A `DryRun` is refused with the same `400`, `403`,
+  `404`, `409` and `413` as the others, and never with `429` or `502`, as
+  it runs nothing.
 
 ### The service invoke client
 
@@ -813,8 +820,10 @@ res, err := c.Invoke(ctx, "rotate", "secretsmanager.amazonaws.com", event,
 	serviceinvoke.WithSourceAccount(accountID))
 ```
 
-`WithEvent()` makes the invocation `Event`. `res` carries `RequestID`,
-`StatusCode`, `ExecutedVersion`, `FunctionError` and `Payload`. The
+`WithEvent()` makes the invocation `Event`, and `WithDryRun()` makes it
+`DryRun`, whose `res` has `StatusCode` `204` and its `RequestID` alone.
+`res` carries `RequestID`, `StatusCode`, `ExecutedVersion`,
+`FunctionError` and `Payload`. The
 payload is sent, and the result returned, byte for byte; a payload that
 is not JSON is an error before anything is sent. It returns
 `serviceinvoke.ErrNotFound`, `ErrAccessDenied` and `ErrConflict` for those
@@ -943,6 +952,15 @@ function that fails is no error: its result has `FunctionError` set.
   trusted, since nothing is expected in front of this service and the header
   is unsigned.
 
+## Upgrading from v0.5
+
+The service invoke endpoint takes `DryRun`. An `InvocationType` of
+`DryRun`, which v0.5 refused with `400` `InvalidRequest`, is now evaluated
+against the function policy and the function's state and answered `204`,
+with nothing run or recorded
+([The service invoke endpoint](#the-service-invoke-endpoint)); the client
+sends one with `serviceinvoke.WithDryRun()`.
+
 ## Upgrading from v0.3
 
 identity v0.5.0 or later is required. The service asks identity for
@@ -989,8 +1007,8 @@ Standalone use is unchanged.
 ## Release and module
 
 This page follows the functions README at
-[v0.5.0](https://github.com/tulehq/functions/blob/v0.5.0/README.md), released as
-`ghcr.io/tulehq/functions:0.5.0`. Two of its "Differences from AWS" bullets,
-on condition keys and service principals, are given here as the README
-corrected them after the release. Its Go module is `tule.dev/functions`, with the
+[v0.6.1](https://github.com/tulehq/functions/blob/v0.6.1/README.md), released as
+`ghcr.io/tulehq/functions:0.6.1`. v0.6.1 moves to identity v0.5.1, so the
+service invoke endpoint accepts a `SourceArn` shorter than 20 characters,
+such as a bucket's `arn:aws:s3:::photos`. Its Go module is `tule.dev/functions`, with the
 source at [github.com/tulehq/functions](https://github.com/tulehq/functions).
