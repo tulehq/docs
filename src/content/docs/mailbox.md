@@ -1,6 +1,6 @@
 ---
 title: mailbox
-description: "mailbox 0.4.0: a local stand-in for SES v2."
+description: "mailbox 0.4.1: a local stand-in for SES v2."
 ---
 
 An Amazon SES v2-compatible mail service that never delivers mail. Every
@@ -23,7 +23,7 @@ With Docker:
 ```sh
 docker run --rm -p 9040:9040 -v mailboxdata:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
-  ghcr.io/tulehq/mailbox:0.4.0
+  ghcr.io/tulehq/mailbox:0.4.1
 ```
 
 The image is based on Alpine, so `docker exec -it <container> sh` gives you a
@@ -714,6 +714,13 @@ curl.
   trusted, since nothing is expected in front of this service and the header
   is unsigned.
 
+## Upgrading from 0.4
+
+- **The `server started` log is written once the port is bound**, and its
+  `addr` is the bound address (such as `[::]:9040`) where it was the
+  configured one (`:9040`); it also has a `tls` field. A port that cannot
+  be bound is no longer logged as started (gas v0.10.0).
+
 ## Upgrading from 0.3
 
 - **identity v0.5.0 or later** (signing-key version 4) is required: the keys
@@ -777,6 +784,6 @@ curl.
 ## Release and module
 
 This page follows the mailbox README at
-[v0.4.0](https://github.com/tulehq/mailbox/blob/v0.4.0/README.md), released as
-`ghcr.io/tulehq/mailbox:0.4.0`. Its Go module is `tule.dev/mailbox`, with the
+[v0.4.1](https://github.com/tulehq/mailbox/blob/v0.4.1/README.md), released as
+`ghcr.io/tulehq/mailbox:0.4.1`. Its Go module is `tule.dev/mailbox`, with the
 source at [github.com/tulehq/mailbox](https://github.com/tulehq/mailbox).

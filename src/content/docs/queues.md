@@ -1,6 +1,6 @@
 ---
 title: queues
-description: "queues 0.6.0: a local stand-in for SQS."
+description: "queues 0.6.1: a local stand-in for SQS."
 ---
 
 An Amazon SQS-compatible queue service that keeps its queues in a local
@@ -23,7 +23,7 @@ With Docker:
 ```sh
 docker run --rm -p 9050:9050 -v queuesdata:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
-  ghcr.io/tulehq/queues:0.6.0
+  ghcr.io/tulehq/queues:0.6.1
 ```
 
 The image is based on Alpine, so `docker exec -it <container> sh` gives you a
@@ -83,6 +83,11 @@ and the configured key keeps working.
 When the server begins to shut down, the long polls in flight return at
 once with no messages, so a shutdown does not wait out their 20 seconds.
 Logs go to the console only; there is no log shipping.
+
+**Changes in v0.6.1.** The `server started` log line is written once the
+port is bound, with the bound address, such as `[::]:9050`, where it gave
+the configured `0.0.0.0:9050`, and a `tls` field. A server that cannot bind
+its port fails without writing it.
 
 ## Permissions
 
@@ -944,6 +949,6 @@ transport error otherwise.
 ## Release and module
 
 This page follows the queues README at
-[v0.6.0](https://github.com/tulehq/queues/blob/v0.6.0/README.md), released as
-`ghcr.io/tulehq/queues:0.6.0`. Its Go module is `tule.dev/queues`, with the
+[v0.6.1](https://github.com/tulehq/queues/blob/v0.6.1/README.md), released as
+`ghcr.io/tulehq/queues:0.6.1`. Its Go module is `tule.dev/queues`, with the
 source at [github.com/tulehq/queues](https://github.com/tulehq/queues).

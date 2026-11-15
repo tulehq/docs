@@ -1,6 +1,6 @@
 ---
 title: object-store
-description: "object-store 0.13.0: a local stand-in for S3."
+description: "object-store 0.13.1: a local stand-in for S3."
 ---
 
 An S3-compatible object store that keeps objects on the local filesystem. It is
@@ -19,7 +19,7 @@ With Docker:
 docker run --rm -p 9000:9000 -v s3data:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
   -e TULE_Storage_Buckets=uploads,assets \
-  ghcr.io/tulehq/object-store:0.13.0
+  ghcr.io/tulehq/object-store:0.13.1
 ```
 
 The image is based on Alpine, so `docker exec -it <container> sh` gives you a
@@ -456,6 +456,13 @@ for:
   only once the caller may read them; UploadPartCopy, which copies no tags,
   checks the destination first. S3 does not document its order, which
   decides the action a doubly denied copy names.
+
+### Changes in v0.13.1
+
+- The `server started` log is written once the port is bound, and its
+  `addr` is the bound address (such as `[::]:9000`) where it was the
+  configured one (`:9000`); it also has a `tls` field. A port that cannot
+  be bound is no longer logged as started (gas v0.10.0).
 
 ### Changes in v0.13.0
 
@@ -1867,7 +1874,7 @@ as on S3. Treat both as opaque; their format may change.
     ghcr.io/tulehq/object-store:0.3.1
   docker run -d --name new -p 9001:9000 -v s3data-new:/data \
     -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
-    ghcr.io/tulehq/object-store:0.13.0
+    ghcr.io/tulehq/object-store:0.13.1
   export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1
   for b in $(aws s3 ls --endpoint-url http://localhost:9000 | awk '{print $3}'); do
     aws s3 sync "s3://$b" "copy/$b" --endpoint-url http://localhost:9000
@@ -1951,6 +1958,6 @@ as on S3. Treat both as opaque; their format may change.
 ## Release and module
 
 This page follows the object-store README at
-[v0.13.0](https://github.com/tulehq/object-store/blob/v0.13.0/README.md), released as
-`ghcr.io/tulehq/object-store:0.13.0`. Its Go module is `tule.dev/object-store`, with the
+[v0.13.1](https://github.com/tulehq/object-store/blob/v0.13.1/README.md), released as
+`ghcr.io/tulehq/object-store:0.13.1`. Its Go module is `tule.dev/object-store`, with the
 source at [github.com/tulehq/object-store](https://github.com/tulehq/object-store).

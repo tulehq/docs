@@ -1,6 +1,6 @@
 ---
 title: accounts
-description: "accounts 0.5.0: a local stand-in for Organizations."
+description: "accounts 0.5.1: a local stand-in for Organizations."
 ---
 
 An AWS Organizations-compatible account service that keeps an organization in
@@ -21,7 +21,7 @@ With Docker:
 ```sh
 docker run --rm -p 9020:9020 -v accountsdata:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
-  ghcr.io/tulehq/accounts:0.5.0
+  ghcr.io/tulehq/accounts:0.5.1
 ```
 
 The image is based on Alpine, so `docker exec -it <container> sh` gives you a
@@ -368,6 +368,6 @@ paginators work.
 ## Release and module
 
 This page follows the accounts README at
-[v0.5.0](https://github.com/tulehq/accounts/blob/v0.5.0/README.md), released as
-`ghcr.io/tulehq/accounts:0.5.0`. Its Go module is `tule.dev/accounts`, with the
+[v0.5.1](https://github.com/tulehq/accounts/blob/v0.5.1/README.md), released as
+`ghcr.io/tulehq/accounts:0.5.1`. Its Go module is `tule.dev/accounts`, with the
 source at [github.com/tulehq/accounts](https://github.com/tulehq/accounts).
