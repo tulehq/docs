@@ -114,17 +114,24 @@ verify with curl; use an SDK or the AWS CLI for those.
 
 ## From a function
 
-Functions run in their own containers, outside the Compose network, and reach
-the other services through the Docker host on their published ports. Set the
+Functions run in their own containers. In [the full stack](/getting-started/full-stack/),
+started with `tule up` or with the compose file, those containers join the
+stack's network and reach the other services by their service names. Set the
 endpoint variables in the function's own `Environment`:
 
 ```sh
 aws --endpoint-url http://localhost:9060 lambda update-function-configuration \
   --function-name hello --environment 'Variables={
-    AWS_ENDPOINT_URL_S3=http://host.docker.internal:9000,
-    AWS_ENDPOINT_URL_SQS=http://host.docker.internal:9050,
-    AWS_ENDPOINT_URL_SESV2=http://host.docker.internal:9040}'
+    AWS_ENDPOINT_URL_S3=http://object-store:9000,
+    AWS_ENDPOINT_URL_SQS=http://queues:9050,
+    AWS_ENDPOINT_URL_SESV2=http://mailbox:9040}'
 ```
+
+functions run outside compose without `TULE_Functions_ContainerNetwork`
+attaches its containers to the default bridge instead, where they reach the
+other services through the Docker host on their published ports, such as
+`http://host.docker.internal:9050`; see
+[On a compose network](/functions/#on-a-compose-network).
 
 Every function gets the configured root key as its credentials by default; see
 [functions](/functions/#calling-tule-services-from-a-function).
