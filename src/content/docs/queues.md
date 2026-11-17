@@ -1,6 +1,6 @@
 ---
 title: queues
-description: "queues 0.6.1: a local stand-in for SQS."
+description: "queues 0.7.0: a local stand-in for SQS."
 ---
 
 An Amazon SQS-compatible queue service that keeps its queues in a local
@@ -23,7 +23,7 @@ With Docker:
 ```sh
 docker run --rm -p 9050:9050 -v queuesdata:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
-  ghcr.io/tulehq/queues:0.6.1
+  ghcr.io/tulehq/queues:0.7.0
 ```
 
 The image is based on Alpine, so `docker exec -it <container> sh` gives you a
@@ -52,6 +52,7 @@ Settings come from environment variables prefixed with `TULE_`, and from a
 |---|---|---|
 | `TULE_Server_Port` | `9050` | Listen port |
 | `TULE_Store_Path` | `./data/queues.db` (`/data/queues.db` in the image) | The SQLite database file; it and its directory are created if missing |
+| `TULE_Store_Queues` | unset | Comma-separated queues to create at startup, if missing, with the default attributes; a name ending in `.fifo` is a FIFO queue. A queue that exists is kept as it is. A name deleted less than 60 seconds before fails the start |
 | `TULE_Queues_AccountID` | `000000000000` | The account queue URLs and ARNs carry: 12 digits |
 | `TULE_Queues_Region` | `us-east-1` | The region queue ARNs carry |
 | `TULE_Queues_BaseURL` | unset | The scheme and host queue URLs start with, such as `http://queues:9050`: an http or https URL with nothing after the host but `/`. Unset, a queue URL starts with the scheme and `Host` the request came in on |
@@ -83,6 +84,10 @@ and the configured key keeps working.
 When the server begins to shut down, the long polls in flight return at
 once with no messages, so a shutdown does not wait out their 20 seconds.
 Logs go to the console only; there is no log shipping.
+
+**Changes in v0.7.0.** `TULE_Store_Queues` names queues to create at
+startup, before the server listens, so a test or a compose stack can rely
+on them without calling CreateQueue first ([Configuration](#configuration)).
 
 **Changes in v0.6.1.** The `server started` log line is written once the
 port is bound, with the bound address, such as `[::]:9050`, where it gave
@@ -949,6 +954,6 @@ transport error otherwise.
 ## Release and module
 
 This page follows the queues README at
-[v0.6.1](https://github.com/tulehq/queues/blob/v0.6.1/README.md), released as
-`ghcr.io/tulehq/queues:0.6.1`. Its Go module is `tule.dev/queues`, with the
+[v0.7.0](https://github.com/tulehq/queues/blob/v0.7.0/README.md), released as
+`ghcr.io/tulehq/queues:0.7.0`. Its Go module is `tule.dev/queues`, with the
 source at [github.com/tulehq/queues](https://github.com/tulehq/queues).
