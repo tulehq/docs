@@ -1,6 +1,6 @@
 ---
 title: cli
-description: "tule 0.1.0: the command-line tool that runs a local Tule stack."
+description: "tule 0.1.1: the command-line tool that runs a local Tule stack."
 ---
 
 `tule` is a command-line tool that runs a local Tule stack: the drop-in
@@ -272,11 +272,14 @@ finds on the Docker daemon itself, with a throwaway container from the
 functions image (pulled for the stack anyway), without a network:
 
 ```sh
-docker run --rm --network none --entrypoint stat -v /var/run/docker.sock:/s ghcr.io/tulehq/functions:0.7.0 -c %g /s
+docker run --rm --network none --entrypoint stat --security-opt label=disable -v /var/run/docker.sock:/s ghcr.io/tulehq/functions:0.7.0 -c %g /s
 ```
 
 It runs only once the plan is printed and `up` has checked for downgrades
-and busy host ports, so a refused `up` runs no container.
+and busy host ports, so a refused `up` runs no container. The probe and
+functions run with SELinux labeling off (`label=disable`): on an SELinux
+host such as Fedora or RHEL, the socket's label keeps a container from
+opening it otherwise. Hosts without SELinux ignore the option.
 
 The mount is made by the daemon, so the group is the socket's on the
 daemon's host: the Linux host, the VM inside Docker Desktop (whose group is
@@ -313,7 +316,7 @@ plugin docker runs may be left running.
 ## Release and module
 
 This page follows the cli README at
-[v0.1.0](https://github.com/tulehq/cli/blob/v0.1.0/README.md), released on
+[v0.1.1](https://github.com/tulehq/cli/blob/v0.1.1/README.md), released on
 the [release page](https://github.com/tulehq/cli/releases). Its Go module is
 `tule.dev/cli`, with the command at `tule.dev/cli/cmd/tule` and the source
 at [github.com/tulehq/cli](https://github.com/tulehq/cli).
