@@ -10,8 +10,8 @@ the resource policies of what it acts on, and the console pointed at each.
 For an app that picks its services in its own compose file, the compose
 file [below](#the-file) runs the stack with Docker Compose alone. It is
 the console's
-[`compose.yaml`](https://github.com/tulehq/console/blob/v0.3.11/compose.yaml)
-at v0.3.11, with every service pinned to its current release, object-store
+[`compose.yaml`](https://github.com/tulehq/console/blob/v0.3.12/compose.yaml)
+at v0.3.12, with every service pinned to its current release, object-store
 pointed at queues and functions to deliver bucket event notifications, and
 secret-store pointed at functions for rotation.
 
@@ -94,7 +94,7 @@ on AWS; see [Cross-account access](/guides/identity/#cross-account-access).
 | mailbox | `ghcr.io/tulehq/mailbox:0.4.1` | 9040 |
 | queues | `ghcr.io/tulehq/queues:0.6.1` | 9050 |
 | functions (profile `functions`) | `ghcr.io/tulehq/functions:0.7.0` | 9060 |
-| console | `ghcr.io/tulehq/console:0.3.11` | 9070 |
+| console | `ghcr.io/tulehq/console:0.3.12` | 9070 |
 
 The table is the compose file's; `tule services` lists each service's image,
 tested version and default ports as `tule` runs them.
@@ -196,9 +196,13 @@ services:
     # The group that owns the socket on the Docker host, from DOCKER_GID as
     # above. Unset, it is 0, the root group.
     group_add: ["${DOCKER_GID:-0}"]
+    # On an SELinux host (Fedora, RHEL) the socket's label keeps containers
+    # from opening it; this turns labeling off for functions alone. Hosts
+    # without SELinux ignore it.
+    security_opt: ["label=disable"]
 
   console:
-    image: ghcr.io/tulehq/console:0.3.11
+    image: ghcr.io/tulehq/console:0.3.12
     depends_on:
       identity: {condition: service_healthy}
       accounts: {condition: service_healthy}
