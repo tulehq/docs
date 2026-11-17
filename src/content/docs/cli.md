@@ -1,6 +1,6 @@
 ---
 title: cli
-description: "tule 0.1.1: the command-line tool that runs a local Tule stack."
+description: "tule 0.1.2: the command-line tool that runs a local Tule stack."
 ---
 
 `tule` is a command-line tool that runs a local Tule stack: the drop-in
@@ -316,7 +316,7 @@ plugin docker runs may be left running.
 ## Release and module
 
 This page follows the cli README at
-[v0.1.1](https://github.com/tulehq/cli/blob/v0.1.1/README.md), released on
+[v0.1.2](https://github.com/tulehq/cli/blob/v0.1.2/README.md), released on
 the [release page](https://github.com/tulehq/cli/releases). Its Go module is
 `tule.dev/cli`, with the command at `tule.dev/cli/cmd/tule` and the source
 at [github.com/tulehq/cli](https://github.com/tulehq/cli).

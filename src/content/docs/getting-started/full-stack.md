@@ -10,8 +10,8 @@ the resource policies of what it acts on, and the console pointed at each.
 For an app that picks its services in its own compose file, the compose
 file [below](#the-file) runs the stack with Docker Compose alone. It is
 the console's
-[`compose.yaml`](https://github.com/tulehq/console/blob/v0.3.12/compose.yaml)
-at v0.3.12, with every service pinned to its current release, object-store
+[`compose.yaml`](https://github.com/tulehq/console/blob/v0.3.13/compose.yaml)
+at v0.3.13, with every service pinned to its current release, object-store
 pointed at queues and functions to deliver bucket event notifications, and
 secret-store pointed at functions for rotation.
 
@@ -92,9 +92,9 @@ on AWS; see [Cross-account access](/guides/identity/#cross-account-access).
 | object-store | `ghcr.io/tulehq/object-store:0.13.1` | 9000 |
 | secret-store | `ghcr.io/tulehq/secret-store:0.6.1` | 9010 |
 | mailbox | `ghcr.io/tulehq/mailbox:0.4.1` | 9040 |
-| queues | `ghcr.io/tulehq/queues:0.6.1` | 9050 |
+| queues | `ghcr.io/tulehq/queues:0.7.0` | 9050 |
 | functions (profile `functions`) | `ghcr.io/tulehq/functions:0.7.0` | 9060 |
-| console | `ghcr.io/tulehq/console:0.3.12` | 9070 |
+| console | `ghcr.io/tulehq/console:0.3.13` | 9070 |
 
 The table is the compose file's; `tule services` lists each service's image,
 tested version and default ports as `tule` runs them.
@@ -167,7 +167,7 @@ services:
     volumes: [maildata:/data]
 
   queues:
-    image: ghcr.io/tulehq/queues:0.6.1
+    image: ghcr.io/tulehq/queues:0.7.0
     environment:
       <<: [*root-key, *identity-endpoint]
       # Queue URLs name the host clients on this machine reach queues at.
@@ -202,7 +202,7 @@ services:
     security_opt: ["label=disable"]
 
   console:
-    image: ghcr.io/tulehq/console:0.3.12
+    image: ghcr.io/tulehq/console:0.3.13
     depends_on:
       identity: {condition: service_healthy}
       accounts: {condition: service_healthy}

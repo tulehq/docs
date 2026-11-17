@@ -84,7 +84,7 @@ docker run --rm -p 9040:9040 -v mailboxdata:/data \
 
 docker run --rm -p 9050:9050 -v queuesdata:/data \
   -e TULE_Auth_AccessKeyID=test -e TULE_Auth_SecretAccessKey=test \
-  ghcr.io/tulehq/queues:0.6.1
+  ghcr.io/tulehq/queues:0.7.0
 ```
 
 functions needs the Docker socket; see [functions](/functions/#running-it).
